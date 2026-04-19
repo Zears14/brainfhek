@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from array import array
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
-from bf2 import ast_nodes as A
+from bf2.core import ast as A
+from bf2.core.errors import BF2RuntimeError
 
 
 def type_size(t: A.TypeRef) -> int:
@@ -33,11 +34,9 @@ def build_struct_layout(decl: A.StructDecl) -> StructLayout:
     return StructLayout(decl.name, list(decl.fields), offs, off)
 
 
-def _arr_type(et: A.TypeRef) -> str:
-    m = {"i8": "b", "i16": "h", "i32": "i", "i64": "q", "f32": "f", "f64": "d", "bool": "B"}
-    if et.name in m:
-        return m[et.name]
-    return "i"
+def _arr_type(et: A.TypeRef) -> Optional[str]:
+    # We use lists for everything in the interpreter to avoid signedness issues with array.array
+    return None
 
 
 @dataclass
@@ -46,7 +45,7 @@ class Segment:
     elem_type: A.TypeRef
     length: int
     struct_layout: Optional[StructLayout] = None
-    cells: array | list[int | float] = field(default_factory=list)
+    cells: Union[array, list[Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.cells:
@@ -75,18 +74,28 @@ class SegmentTable:
     def add_segment(self, decl: A.SegmentDecl, layout: Optional[StructLayout]) -> None:
         self.segments[decl.name] = Segment(decl.name, decl.elem_type, decl.length, layout, [])
 
-    def read_slot(self, seg: str, slot: int) -> int | float:
-        return self.segments[seg].cells[slot]
+    def read_slot(self, seg: str, slot: int) -> Any:
+        try:
+            return self.segments[seg].cells[slot]
+        except IndexError:
+            length = len(self.segments[seg].cells)
+            raise BF2RuntimeError(f"Index out of bounds reading segment '{seg}': slot {slot}, length {length}")
 
-    def write_slot(self, seg: str, slot: int, val: int | float) -> None:
-        self.segments[seg].cells[slot] = val
+    def write_slot(self, seg: str, slot: int, val: Any) -> None:
+        try:
+            self.segments[seg].cells[slot] = val
+        except IndexError:
+            length = len(self.segments[seg].cells)
+            raise BF2RuntimeError(f"Index out of bounds writing segment '{seg}': slot {slot}, length {length}")
 
     def resolve_ref(self, parts: list[Any]) -> tuple[str, int]:
         if not parts or parts[0] == "@":
             raise KeyError("bad ref")
-        from bf2.ast_nodes import IntLit
-
+        
         seg = str(parts[0])
+        if seg not in self.segments:
+            raise KeyError(f"unknown segment '{seg}'")
+            
         s = self.segments[seg]
         layout = s.struct_layout
         slot = 0
@@ -94,18 +103,20 @@ class SegmentTable:
         i = 1
         while i < len(parts):
             p = parts[i]
-            if isinstance(p, IntLit):
+            if isinstance(p, A.IntLit):
                 idx = int(p.value)
-                slot += idx * stride if layout else idx
+                slot += idx * stride
                 i += 1
                 continue
             if isinstance(p, str) and p != "@":
                 if layout is None:
-                    raise KeyError("field without struct")
+                    raise KeyError(f"field '{p}' without struct layout")
+                if p not in layout.offsets:
+                    raise KeyError(f"unknown field '{p}' in struct '{layout.name}'")
                 slot += layout.offsets[p]
                 i += 1
                 continue
-            raise TypeError(p)
+            raise TypeError(f"Invalid reference part: {type(p)}")
         return seg, slot
 
 

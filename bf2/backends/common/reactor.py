@@ -16,7 +16,7 @@ class ReactorEngine:
         return self._depth > 0
 
     def fire(self, addr: str, new_val: Any) -> None:
-        if self._depth > 0:
+        if self._depth > 8: # recursion limit
             return
         self._depth += 1
         try:

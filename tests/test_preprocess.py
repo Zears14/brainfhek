@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from bf2.parser import parse_source
-from bf2.preprocess import PreprocessError, preprocess, preprocess_path
-from bf2.typechecker import check_module
+from bf2.compiler.parser import parse_source
+from bf2.compiler.preprocess import PreprocessError, preprocess, preprocess_path
+from bf2.compiler.typechecker import check_module
 
 
 def test_include_stdlib_sets_flag_and_defines_expand(tmp_path):

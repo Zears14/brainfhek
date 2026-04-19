@@ -1,8 +1,8 @@
 import pytest
 
-from bf2.errors import BF2TypeError
-from bf2.parser import parse_source
-from bf2.typechecker import check_module
+from bf2.core.errors import BF2TypeError
+from bf2.compiler.parser import parse_source
+from bf2.compiler.typechecker import check_module
 
 
 def test_typecheck_ok():

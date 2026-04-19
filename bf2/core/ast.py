@@ -1,9 +1,11 @@
 from __future__ import annotations
-
 from dataclasses import dataclass, field
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, TYPE_CHECKING
 
-from bf2.errors import SourceLoc
+from bf2.core.errors import SourceLoc
+
+if TYPE_CHECKING:
+    from bf2.core.visitor import ASTVisitor
 
 
 @dataclass
@@ -16,12 +18,6 @@ class TypeRef:
             return f"ptr<{self.inner}>"
         return self.name
 
-    def to_llvm_ir_hint(self) -> str:
-        if self.name == "ptr" and self.inner:
-            return f"{self.inner.to_llvm_ir_hint()}*"
-        m = {"i8": "i8", "i16": "i16", "i32": "i32", "i64": "i64", "f32": "float", "f64": "double", "bool": "i1"}
-        return m.get(self.name, self.name)
-
 
 @dataclass
 class Module:
@@ -30,8 +26,8 @@ class Module:
     #: Set when sources use ``#include`` of the Linux libc stdlib header.
     use_linux_stdlib: bool = False
 
-    def to_llvm_ir_hint(self) -> str:
-        return "; module"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_module(self)
 
 
 @dataclass
@@ -40,8 +36,8 @@ class StructDecl:
     fields: list[tuple[str, TypeRef]]
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return f"%{self.name} = type {{ ... }}"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_struct_decl(self)
 
 
 @dataclass
@@ -51,8 +47,8 @@ class SegmentDecl:
     length: int
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return f"%{self.name} = alloca [{self.length} x {self.elem_type.to_llvm_ir_hint()}]"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_segment_decl(self)
 
 
 @dataclass
@@ -63,9 +59,8 @@ class FunctionDef:
     body: Block
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        args = ", ".join(f"{t.to_llvm_ir_hint()} %{n}" for n, t in self.params)
-        return f"define {self.ret.to_llvm_ir_hint()} @{self.name}({args})"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_function_def(self)
 
 
 @dataclass
@@ -74,8 +69,8 @@ class ReactorDef:
     body: Block
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "store ... + call void @reactor_..."
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_reactor_def(self)
 
 
 @dataclass
@@ -83,8 +78,8 @@ class Block:
     stmts: list[Any]
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "{ ... basic blocks ... }"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_block(self)
 
 
 # --- expressions ---
@@ -93,12 +88,11 @@ class Block:
 @dataclass
 class RefExpr:
     """seg[i], seg.field chain, @name"""
-
     parts: list[Union[str, int, "Expr"]]
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "getelementptr + load/store"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_ref_expr(self)
 
 
 @dataclass
@@ -106,8 +100,8 @@ class Ident:
     name: str
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "%" + self.name
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_ident(self)
 
 
 @dataclass
@@ -115,8 +109,8 @@ class IntLit:
     value: int
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return str(self.value)
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_int_lit(self)
 
 
 @dataclass
@@ -124,8 +118,8 @@ class FloatLit:
     value: float
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return str(self.value)
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_float_lit(self)
 
 
 @dataclass
@@ -133,8 +127,8 @@ class BoolLit:
     value: bool
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "i1 true" if self.value else "i1 false"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_bool_lit(self)
 
 
 @dataclass
@@ -143,8 +137,8 @@ class Unary:
     expr: "Expr"
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return {"-": "sub 0, %v", "*": "load", "&": "getelementptr"}.get(self.op, self.op)
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_unary(self)
 
 
 @dataclass
@@ -154,9 +148,8 @@ class BinOp:
     right: "Expr"
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        m = {"+": "add nsw", "-": "sub nsw", "*": "mul nsw", "/": "sdiv", "%": "srem"}
-        return m.get(self.op, "fcmp/fadd") + " ..."
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_bin_op(self)
 
 
 @dataclass
@@ -165,8 +158,8 @@ class Call:
     args: list["Expr"]
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return f"call @{self.name}(...)"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_call(self)
 
 
 Expr = Union[RefExpr, Ident, IntLit, FloatLit, BoolLit, Unary, BinOp, Call]
@@ -180,8 +173,8 @@ class MoveOp:
     target: RefExpr
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "ptr = getelementptr ..."
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_move_op(self)
 
 
 @dataclass
@@ -189,8 +182,8 @@ class MoveRel:
     delta: int
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "ptr += delta * sizeof(cell)"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_move_rel(self)
 
 
 @dataclass
@@ -199,8 +192,8 @@ class CellArith:
     amount: Optional[Union[int, float]]
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return {"+": "add nsw", "-": "sub nsw", "*": "mul nsw", "/": "sdiv"}.get(self.op, self.op) + " cell, imm"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_cell_arith(self)
 
 
 @dataclass
@@ -210,8 +203,8 @@ class CellArithRef:
     amount: Union[int, float]
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "load addr; op; store"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_cell_arith_ref(self)
 
 
 @dataclass
@@ -219,8 +212,8 @@ class CellAssignLit:
     value: Union[int, float, bool]
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "store imm, ptr %cell"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_cell_assign_lit(self)
 
 
 @dataclass
@@ -228,8 +221,8 @@ class LoadOp:
     src: RefExpr
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "%r = load T, T* addr; store %r, cellptr"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_load_op(self)
 
 
 @dataclass
@@ -237,8 +230,8 @@ class StoreOp:
     dst: RefExpr
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "store cellval, T* addr"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_store_op(self)
 
 
 @dataclass
@@ -246,8 +239,8 @@ class SwapOp:
     other: RefExpr
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "load both; store swapped"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_swap_op(self)
 
 
 @dataclass
@@ -256,8 +249,8 @@ class AssignStmt:
     rhs: Expr
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "store rhs, addr"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_assign_stmt(self)
 
 
 @dataclass
@@ -267,8 +260,8 @@ class VarDecl:
     init: Optional[Expr]
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return f"%{self.name} = alloca {self.ty.to_llvm_ir_hint()}"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_var_decl(self)
 
 
 @dataclass
@@ -278,8 +271,8 @@ class PtrDecl:
     init: Expr
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return f"%{self.name} = getelementptr ..."
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_ptr_decl(self)
 
 
 @dataclass
@@ -288,8 +281,8 @@ class PtrArith:
     delta: int
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "getelementptr inbounds T, T* %p, i64 delta"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_ptr_arith(self)
 
 
 @dataclass
@@ -298,8 +291,8 @@ class PtrWrite:
     value: Expr
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "store T %v, T* %p"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_ptr_write(self)
 
 
 @dataclass
@@ -307,17 +300,15 @@ class PtrRead:
     ptr: str
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "%r = load T, T* %p"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_ptr_read(self)
 
 
 @dataclass
 class Cond:
     kind: str
     imm: Optional[Union[int, float]] = None
-
-    def to_llvm_ir_hint(self) -> str:
-        return "icmp ..."
+    expr: Optional["Expr"] = None
 
 
 @dataclass
@@ -327,8 +318,8 @@ class IfStmt:
     els: Optional[Block]
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "br i1 %c, label %then, label %else"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_if_stmt(self)
 
 
 @dataclass
@@ -336,8 +327,8 @@ class LoopBF:
     body: Block
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "loop: phi; br i1 %nonzero, body, exit"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_loop_bf(self)
 
 
 @dataclass
@@ -346,8 +337,8 @@ class LoopCounted:
     body: Block
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "repeat N: br loop"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_loop_counted(self)
 
 
 @dataclass
@@ -355,8 +346,8 @@ class LabelStmt:
     name: str
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return f"{self.name}:"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_label_stmt(self)
 
 
 @dataclass
@@ -364,8 +355,8 @@ class JumpStmt:
     name: str
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return f"br label %{self.name}"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_jump_stmt(self)
 
 
 @dataclass
@@ -374,16 +365,8 @@ class IOStmt:
     expr: Optional[Expr] = None
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        m = {
-            ".": "call putchar",
-            ",": "call getchar",
-            ".i": "call bf2_print_int",
-            ".f": "call bf2_print_float",
-            ".s": "call bf2_print_str",
-            ",s": "call bf2_read_line",
-        }
-        return m.get(self.kind, "io")
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_io_stmt(self)
 
 
 @dataclass
@@ -391,8 +374,8 @@ class CallStmt:
     call: Call
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return self.call.to_llvm_ir_hint()
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_call_stmt(self)
 
 
 @dataclass
@@ -400,8 +383,8 @@ class RetStmt:
     value: Optional[Expr]
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "ret T %v"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_ret_stmt(self)
 
 
 @dataclass
@@ -411,8 +394,8 @@ class AllocStmt:
     name: str
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "%p = call i8* @malloc(i64 n); bitcast"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_alloc_stmt(self)
 
 
 @dataclass
@@ -420,8 +403,8 @@ class FreeStmt:
     ptr: str
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "call void @free(i8* %p)"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_free_stmt(self)
 
 
 @dataclass
@@ -429,8 +412,8 @@ class ExprStmt:
     expr: Expr
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return "expr as stmt"
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_expr_stmt(self)
 
 
 @dataclass
@@ -438,8 +421,8 @@ class SegmentStmt:
     decl: SegmentDecl
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return self.decl.to_llvm_ir_hint()
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_segment_stmt(self)
 
 
 @dataclass
@@ -447,5 +430,5 @@ class StructStmt:
     decl: StructDecl
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
-    def to_llvm_ir_hint(self) -> str:
-        return self.decl.to_llvm_ir_hint()
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_struct_stmt(self)

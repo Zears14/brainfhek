@@ -1,8 +1,7 @@
-import pytest
 
-from bf2.interpreter import Interpreter, is_classic_bf, run_bf_classic
-from bf2.parser import parse_source
-from bf2.typechecker import check_module
+from bf2.backends.interpreter.engine import Interpreter, is_classic_bf, run_bf_classic
+from bf2.compiler.parser import parse_source
+from bf2.compiler.typechecker import check_module
 
 
 def test_classic_bf_hello_piece():

@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from bf2.llvm_emit import emit_llvm_ir
-from bf2.parser import parse_source
-from bf2.preprocess import preprocess
-from bf2.typechecker import check_module
+from bf2.backends.llvm.emitter import emit_llvm_ir
+from bf2.compiler.parser import parse_source
+from bf2.compiler.preprocess import preprocess
+from bf2.compiler.typechecker import check_module
 
 
 def _emit(src: str, *, main_path: Path | None = None) -> str:

@@ -1,7 +1,7 @@
 import pytest
 
-from bf2.errors import BF2SyntaxError
-from bf2.parser import parse_source
+from bf2.core.errors import BF2SyntaxError
+from bf2.compiler.parser import parse_source
 
 
 def test_parse_minimal_module():

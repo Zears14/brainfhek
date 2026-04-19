@@ -1,6 +1,5 @@
-import pytest
 
-from bf2.lexer import Lexer, Token
+from bf2.compiler.lexer import Lexer
 
 
 def test_token_kinds_basic():
