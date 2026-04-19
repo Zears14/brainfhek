@@ -13,6 +13,10 @@ from bf2.backends.llvm.emitter import LLVMEmitterVisitor, LLVMGenError
 
 
 def main(argv: list[str] | None = None) -> int:
+    if sys.platform != "linux":
+        sys.stderr.write("bf2: error: this compiler and runtime only support Linux.\n")
+        return 1
+
     p = argparse.ArgumentParser(prog="bf2")
     sub = p.add_subparsers(dest="cmd", required=True)
     
