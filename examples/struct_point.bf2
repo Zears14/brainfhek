@@ -1,0 +1,25 @@
+#include "stdlib"
+
+struct Point { x: i32, y: i32 }
+seg origin { Point }
+seg dest { Point }
+
+fn distance(a: ptr<Point>, b: ptr<Point>) -> f64 {
+    seg tmp { f64[2] }
+    tmp[0] = a.x - b.x
+    tmp[0] = tmp[0] * tmp[0]
+    tmp[1] = a.y - b.y
+    tmp[1] = tmp[1] * tmp[1]
+    tmp[0] = tmp[0] + tmp[1]
+    ret call sqrt(tmp[0])
+}
+
+fn main() -> i32 {
+    origin.x = 0
+    origin.y = 0
+    dest.x = 3
+    dest.y = 4
+    f64 d = call distance(&origin, &dest)
+    d .f
+    ret 0
+}

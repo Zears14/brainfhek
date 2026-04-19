@@ -1,0 +1,26 @@
+#include "stdlib"
+
+// Emit bytes from a small i8 segment (placeholder for in-place reversal)
+seg buf { i8[8] }
+
+fn main() -> i32 {
+    buf[0] = 111
+    buf[1] = 108
+    buf[2] = 108
+    buf[3] = 101
+    buf[4] = 104
+    buf[5] = 10
+    load buf[0]
+    .
+    load buf[1]
+    .
+    load buf[2]
+    .
+    load buf[3]
+    .
+    load buf[4]
+    .
+    load buf[5]
+    .
+    ret 0
+}

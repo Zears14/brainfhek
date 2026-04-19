@@ -1,0 +1,19 @@
+#include "stdlib"
+
+seg vals { i32[4] }
+seg display { i32[1] }
+
+watch vals[0] {
+    if(> 100) { vals[0] = 100 }
+    if(< 0)   { vals[0] = 0   }
+    store display[0]
+    load display[0]
+    .i
+}
+
+fn main() -> i32 {
+    vals[0] = 50
+    vals[0] = 200
+    vals[0] = -5
+    ret 0
+}

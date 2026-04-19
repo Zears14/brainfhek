@@ -1,0 +1,41 @@
+#include "stdlib"
+
+fn fib(n: i32) -> i32 {
+    if(== 0) { ret 0 }
+    if(== 1) { ret 1 }
+    
+    seg m { i32[4] }
+    
+    m[0] = 0
+    m[1] = 1
+    m[2] = 0
+    m[3] = 1
+    
+    seg cond { i32[1] }
+    
+    jump loop_start
+    label loop_start
+    m[2] = m[0] + m[1]
+    m[0] = m[1]
+    m[1] = m[2]
+    m[3] = m[3] + 1
+    cond[0] = n - m[3]
+    @cond[0]
+    if(== 0) {
+        ret m[2]
+    }
+    jump loop_start
+    
+    ret 0
+}
+
+fn main() -> i32 {
+    seg i { i32[1] }
+    i[0] = 0
+    {40} {
+        i32 r = call fib(i[0])
+        r .i
+        i[0] +1
+    }
+    ret 0
+}

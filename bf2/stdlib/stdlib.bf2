@@ -1,0 +1,12 @@
+// BF2 Linux standard library (preprocessor + LLVM).
+// Use:   #include "stdlib"   or   #include <stdlib>
+//
+// Defines below expand to integer literals. The compiler also emits libc
+// declares (write, read, open, close, exit, fork, getpid, strlen, nanosleep)
+// and named i32 globals for standard fds and open() flags in the .ll file.
+
+#define STDIN 0
+#define STDOUT 1
+#define STDERR 2
+#define O_RDONLY 0
+#define O_CREAT 64

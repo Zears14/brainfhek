@@ -1,0 +1,11 @@
+#include "stdlib"
+
+// Cursor on __bf tape: literal assign, LoopBF (`[` + braced block), MoveRel — for `bf2 compile` + clang.
+fn main() -> i32 {
+    = 3
+    [ {
+        .
+        -
+    }
+    ret 0
+}
