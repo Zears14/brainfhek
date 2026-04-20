@@ -132,6 +132,15 @@ class BoolLit:
 
 
 @dataclass
+class StringLit:
+    value: str
+    loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
+
+    def accept(self, visitor: ASTVisitor) -> Any:
+        return visitor.visit_string_lit(self)
+
+
+@dataclass
 class Unary:
     op: str
     expr: "Expr"
@@ -162,7 +171,7 @@ class Call:
         return visitor.visit_call(self)
 
 
-Expr = Union[RefExpr, Ident, IntLit, FloatLit, BoolLit, Unary, BinOp, Call]
+Expr = Union[RefExpr, Ident, IntLit, FloatLit, BoolLit, StringLit, Unary, BinOp, Call]
 
 
 # --- statements ---

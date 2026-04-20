@@ -22,7 +22,7 @@ python -m bf2 run path/to/file.bf2
 python -m bf2 compile path/to/file.bf2 -o out.ll   # then: clang out.ll -o a.out
 ```
 
-Most programs under `examples/` compile with `bf2 compile` and link with `clang` (libc only). Classic-only `.bf` sources (e.g. `hello.bf2` containing only `><+-.,[]`) are meant for `bf2 run`, not the BF2 compiler.
+Most programs under `examples/` compile with `bf2 compile` and link with `clang` (libc only). Classic-only `.bf` sources (e.g. `hello.bf` containing only `><+-.,[]`) are meant for `bf2 run`, not the BF2 compiler.
 
 - Programs that contain **only** classic Brainfuck (`><+-.,[]`) plus whitespace are executed on a 30 000-cell `i8` tape (no `seg` needed).
 - BF2 programs are parsed, type-checked, and interpreted.
