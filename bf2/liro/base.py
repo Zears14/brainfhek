@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from llvmlite import binding
 
 
 class LIROPass(ABC):
     """Abstract base for all LIRO (LLVM IR Optimization) passes.
 
-    A LIRO operates on raw IR text lines and returns transformed lines.
+    A LIRO operates on llvmlite binding.ModuleRef and returns a (possibly modified) module.
     Each pass **must** be independent — it cannot assume any other LIRO
     has run before or after it.
     """
@@ -21,8 +24,8 @@ class LIROPass(ABC):
     description: str = ""
 
     @abstractmethod
-    def run(self, lines: List[str]) -> List[str]:
-        """Transform IR lines and return the (possibly modified) list."""
+    def run(self, module: binding.ModuleRef) -> binding.ModuleRef:
+        """Transform ModuleRef and return the (possibly modified) module."""
         ...
 
 

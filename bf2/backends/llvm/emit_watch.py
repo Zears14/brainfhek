@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
+
+from llvmlite import ir
 
 from bf2.core import ast as A
 from bf2.backends.llvm.emit_state import EmitState
-from bf2.backends.llvm.types import scalar_ty
+from bf2.backends.llvm.context import LLVMContext
+from bf2.backends.llvm.types import to_ir_type, Int32, Pointer
+
+if TYPE_CHECKING:
+    pass
 
 
 def try_static_seg_slot(st: EmitState, r: A.RefExpr) -> Optional[Tuple[str, int]]:
@@ -28,26 +34,43 @@ def try_static_seg_slot(st: EmitState, r: A.RefExpr) -> Optional[Tuple[str, int]
 
 def emit_watch_fn(st: EmitState, idx: int, seg: str, slot: int, r: A.ReactorDef) -> None:
     """Emit a reactor function body ``@bf2.watch.N``."""
-    from bf2.backends.llvm.context import LLVMContext
     from bf2.backends.llvm.emit_stmts import emit_stmt
 
-    st.alloca_lines = []
-    st.ctx = LLVMContext("void")
-    st.lines.append(f"define void @bf2.watch.{idx}() #0 {{")
-    st.lines.append("entry:")
-    insertion_point = len(st.lines)
-    # Reactors run with cursor at watched slot
-    p = st.seg_slots[seg]
-    st.alloca_lines.append("  %__cseg = alloca ptr, align 8")
-    st.alloca_lines.append("  %__cslot = alloca i32, align 4")
-    st.lines.append(f"  store ptr {p}, ptr %__cseg, align 8")
-    st.lines.append(f"  store i32 {slot}, ptr %__cslot, align 4")
-    st.ctx.cursor_type = scalar_ty(st.global_segs[seg].elem_type)
+    fn_ty = ir.FunctionType(ir.VoidType(), [])
+    fn_name = f"bf2.watch.{idx}"
+    fn = st.module.globals.get(fn_name)
+    if fn is None:
+        fn = ir.Function(st.module, fn_ty, name=fn_name)
+    if fn.blocks:
+        return
+    entry_block = fn.append_basic_block(name="entry")
+    builder = ir.IRBuilder(entry_block)
+
+    seg_slot = st.seg_slots[seg]
+    cursor_type = to_ir_type(st.global_segs[seg].elem_type)
+
+    cseg_ptr = builder.alloca(Pointer, name="__cseg")
+    cslot_ptr = builder.alloca(Int32, name="__cslot")
+
+    slot_ptr = builder.gep(
+        seg_slot,
+        [ir.Constant(Int32, 0), ir.Constant(Int32, slot)],
+        inbounds=True,
+        name=f"watch.slot.{idx}",
+    )
+    slot_cast = builder.bitcast(slot_ptr, Pointer, name=f"watch.slot.cast.{idx}")
+    builder.store(slot_cast, cseg_ptr, align=8)
+    builder.store(ir.Constant(Int32, 0), cslot_ptr, align=4)
+
+    st.ctx = LLVMContext(A.TypeRef("void"), builder)
+    st.ctx.locals["__cseg"] = (cseg_ptr, Pointer)
+    st.ctx.locals["__cslot"] = (cslot_ptr, Int32)
+    st.ctx.cursor_type = cursor_type
+
     for stmt in r.body.stmts:
         emit_stmt(st, stmt)
-    st.lines[insertion_point:insertion_point] = st.alloca_lines
-    st.lines.append("  ret void")
-    st.lines.append("}")
+
+    builder.ret_void()
 
 
 def emit_maybe_watch(st: EmitState, seg: str, slot_ssa: str) -> None:
@@ -57,49 +80,78 @@ def emit_maybe_watch(st: EmitState, seg: str, slot_ssa: str) -> None:
     we compare it against each watch's slot at Python compile time.  When
     they don't match, we emit zero IR (the reactor can never fire).
     """
+    ctx = st.ctx
+    if ctx.builder.block.is_terminated:
+        return
     is_static_slot = slot_ssa.lstrip("-").isdigit()
 
     for i, (wseg, wslot, _) in enumerate(st.watches):
         if wseg != seg:
             continue
 
-        # Constant fold: static slot that doesn't match → skip entirely
         if is_static_slot and int(slot_ssa) != wslot:
             continue
 
-        l_skip = st.ctx.next_temp("skip.watch")
-        l_fire = st.ctx.next_temp("fire.watch")
-        l_join = st.ctx.next_temp("join.watch")
+        skip_block = ctx.builder.append_basic_block(name=ctx.next_temp(f"skip.watch.{i}"))
+        fire_block = ctx.builder.append_basic_block(name=ctx.next_temp(f"fire.watch.{i}"))
+        join_block = ctx.builder.append_basic_block(name=ctx.next_temp(f"join.watch.{i}"))
 
         if is_static_slot:
-            # Slot matches statically, only need depth check
-            d = "%" + st.ctx.next_temp("depth")
-            st.lines.append(f"  {d} = load i32, ptr @bf2.watch.depth, align 4")
-            can_fire = "%" + st.ctx.next_temp("can_fire")
-            st.lines.append(f"  {can_fire} = icmp slt i32 {d}, 8")
-            st.lines.append(f"  br i1 {can_fire}, label %{l_fire}, label %{l_skip}")
-        else:
-            # Dynamic slot: need both icmp and depth check
-            is_slot = "%" + st.ctx.next_temp("is_slot")
-            st.lines.append(f"  {is_slot} = icmp eq i32 {slot_ssa}, {wslot}")
-            d = "%" + st.ctx.next_temp("depth")
-            st.lines.append(f"  {d} = load i32, ptr @bf2.watch.depth, align 4")
-            can_fire = "%" + st.ctx.next_temp("can_fire")
-            st.lines.append(f"  {can_fire} = icmp slt i32 {d}, 8")
-            must_fire = "%" + st.ctx.next_temp("must_fire")
-            st.lines.append(f"  {must_fire} = and i1 {is_slot}, {can_fire}")
-            st.lines.append(f"  br i1 {must_fire}, label %{l_fire}, label %{l_skip}")
+            depth_ptr = st.module.globals.get("bf2.watch.depth")
+            if depth_ptr is None:
+                depth_ptr = ir.GlobalVariable(st.module, Int32, name="bf2.watch.depth")
+                depth_ptr.initializer = ir.Constant(Int32, 0)
 
-        st.lines.append(f"{l_fire}:")
-        nd = "%" + st.ctx.next_temp("ndepth")
-        st.lines.append(f"  {nd} = add i32 {d}, 1")
-        st.lines.append(f"  store i32 {nd}, ptr @bf2.watch.depth, align 4")
-        st.lines.append(f"  call void @bf2.watch.{i}()")
-        st.lines.append(f"  store i32 {d}, ptr @bf2.watch.depth, align 4")
-        st.lines.append(f"  br label %{l_join}")
-        st.lines.append(f"{l_skip}:")
-        st.lines.append(f"  br label %{l_join}")
-        st.lines.append(f"{l_join}:")
+            d = ctx.builder.load(depth_ptr, align=4, name=ctx.next_temp("depth"))
+            can_fire = ctx.builder.icmp_signed("<", d, ir.Constant(Int32, 8), name=ctx.next_temp("can_fire"))
+            ctx.builder.cbranch(can_fire, fire_block, skip_block)
+
+            ctx.builder.position_at_end(fire_block)
+            ndepth = ctx.builder.add(d, ir.Constant(Int32, 1), name=ctx.next_temp("ndepth"))
+            ctx.builder.store(ndepth, depth_ptr, align=4)
+
+            watch_name = f"bf2.watch.{i}"
+            watch_fn = st.module.globals.get(watch_name)
+            if watch_fn is None:
+                watch_fn = ir.Function(st.module, ir.FunctionType(ir.VoidType(), []), name=watch_name)
+            ctx.builder.call(watch_fn, [])
+            ctx.builder.store(d, depth_ptr, align=4)
+            ctx.builder.branch(join_block)
+
+            ctx.builder.position_at_end(skip_block)
+            ctx.builder.branch(join_block)
+
+            ctx.builder.position_at_end(join_block)
+        else:
+            slot_val = ir.Constant(Int32, int(slot_ssa))
+            is_slot = ctx.builder.icmp_signed("==", slot_val, ir.Constant(Int32, wslot), name=ctx.next_temp("is_slot"))
+
+            depth_ptr = st.module.globals.get("bf2.watch.depth")
+            if depth_ptr is None:
+                depth_ptr = ir.GlobalVariable(st.module, Int32, name="bf2.watch.depth")
+                depth_ptr.initializer = ir.Constant(Int32, 0)
+
+            d = ctx.builder.load(depth_ptr, align=4, name=ctx.next_temp("depth"))
+            can_fire = ctx.builder.icmp_signed("<", d, ir.Constant(Int32, 8), name=ctx.next_temp("can_fire"))
+            must_fire = ctx.builder.and_(is_slot, can_fire, name=ctx.next_temp("must_fire"))
+            ctx.builder.cbranch(must_fire, fire_block, skip_block)
+
+            ctx.builder.position_at_end(fire_block)
+            ndepth = ctx.builder.add(d, ir.Constant(Int32, 1), name=ctx.next_temp("ndepth"))
+            ctx.builder.store(ndepth, depth_ptr, align=4)
+
+            watch_name = f"bf2.watch.{i}"
+            watch_fn = st.module.globals.get(watch_name)
+            if watch_fn is None:
+                watch_fn = ir.Function(st.module, ir.FunctionType(ir.VoidType(), []), name=watch_name)
+            ctx.builder.call(watch_fn, [])
+            ctx.builder.store(d, depth_ptr, align=4)
+            ctx.builder.branch(join_block)
+
+            ctx.builder.position_at_end(skip_block)
+            ctx.builder.branch(join_block)
+
+            ctx.builder.position_at_end(join_block)
 
 
 def emit_maybe_watch_current(st: EmitState) -> None:
@@ -107,42 +159,55 @@ def emit_maybe_watch_current(st: EmitState) -> None:
     if not st.watches:
         return
 
-    seg_ptr = "%" + st.ctx.next_temp("cseg_ptr")
-    st.lines.append(f"  {seg_ptr} = load ptr, ptr %__cseg, align 8")
-    slot_v = "%" + st.ctx.next_temp("cslot_val")
-    st.lines.append(f"  {slot_v} = load i32, ptr %__cslot, align 4")
+    ctx = st.ctx
+    cseg_ptr, _ = ctx.locals["__cseg"]
+    cslot_ptr, _ = ctx.locals["__cslot"]
+    seg_ptr_val = ctx.builder.load(cseg_ptr, align=8, name=ctx.next_temp("cseg_ptr"))
+    slot_v = ctx.builder.load(cslot_ptr, align=4, name=ctx.next_temp("cslot_val"))
 
     for i, (wseg, wslot, _) in enumerate(st.watches):
-        l_skip = st.ctx.next_temp("skip.watch")
-        l_fire = st.ctx.next_temp("fire.watch")
-        l_join = st.ctx.next_temp("join.watch")
-
         wseg_ptr = st.seg_slots[wseg]
-        is_seg = "%" + st.ctx.next_temp("is_seg")
-        st.lines.append(f"  {is_seg} = icmp eq ptr {seg_ptr}, {wseg_ptr}")
-        is_slot = "%" + st.ctx.next_temp("is_slot")
-        st.lines.append(f"  {is_slot} = icmp eq i32 {slot_v}, {wslot}")
-        match = "%" + st.ctx.next_temp("match")
-        st.lines.append(f"  {match} = and i1 {is_seg}, {is_slot}")
+        watched_ptr = ctx.builder.gep(
+            wseg_ptr,
+            [ir.Constant(Int32, 0), ir.Constant(Int32, wslot)],
+            inbounds=True,
+            name=ctx.next_temp("watch.ptr"),
+        )
+        watched_cast = ctx.builder.bitcast(watched_ptr, Pointer, name=ctx.next_temp("watch.cast"))
+        is_seg = ctx.builder.icmp_signed("==", seg_ptr_val, watched_cast, name=ctx.next_temp("is_seg"))
+        is_slot = ctx.builder.icmp_signed("==", slot_v, ir.Constant(Int32, 0), name=ctx.next_temp("is_slot"))
+        match = ctx.builder.and_(is_seg, is_slot, name=ctx.next_temp("match"))
 
-        d = "%" + st.ctx.next_temp("depth")
-        st.lines.append(f"  {d} = load i32, ptr @bf2.watch.depth, align 4")
-        can_fire = "%" + st.ctx.next_temp("can_fire")
-        st.lines.append(f"  {can_fire} = icmp slt i32 {d}, 8")
+        depth_ptr = st.module.globals.get("bf2.watch.depth")
+        if depth_ptr is None:
+            depth_ptr = ir.GlobalVariable(st.module, Int32, name="bf2.watch.depth")
+            depth_ptr.initializer = ir.Constant(Int32, 0)
 
-        must_fire = "%" + st.ctx.next_temp("must_fire")
-        st.lines.append(f"  {must_fire} = and i1 {match}, {can_fire}")
+        d = ctx.builder.load(depth_ptr, align=4, name=ctx.next_temp("depth"))
+        can_fire = ctx.builder.icmp_signed("<", d, ir.Constant(Int32, 8), name=ctx.next_temp("can_fire"))
+        must_fire = ctx.builder.and_(match, can_fire, name=ctx.next_temp("must_fire"))
 
-        st.lines.append(f"  br i1 {must_fire}, label %{l_fire}, label %{l_skip}")
-        st.lines.append(f"{l_fire}:")
-        nd = "%" + st.ctx.next_temp("ndepth")
-        st.lines.append(f"  {nd} = add i32 {d}, 1")
-        st.lines.append(f"  store i32 {nd}, ptr @bf2.watch.depth, align 4")
-        st.lines.append(f"  call void @bf2.watch.{i}()")
-        st.lines.append(f"  store ptr {seg_ptr}, ptr %__cseg, align 8")
-        st.lines.append(f"  store i32 {slot_v}, ptr %__cslot, align 4")
-        st.lines.append(f"  store i32 {d}, ptr @bf2.watch.depth, align 4")
-        st.lines.append(f"  br label %{l_join}")
-        st.lines.append(f"{l_skip}:")
-        st.lines.append(f"  br label %{l_join}")
-        st.lines.append(f"{l_join}:")
+        fire_block = ctx.builder.append_basic_block(name=ctx.next_temp(f"fire.watch.{i}"))
+        skip_block = ctx.builder.append_basic_block(name=ctx.next_temp(f"skip.watch.{i}"))
+        join_block = ctx.builder.append_basic_block(name=ctx.next_temp(f"join.watch.{i}"))
+
+        ctx.builder.cbranch(must_fire, fire_block, skip_block)
+
+        ctx.builder.position_at_end(fire_block)
+        ndepth = ctx.builder.add(d, ir.Constant(Int32, 1), name=ctx.next_temp("ndepth"))
+        ctx.builder.store(ndepth, depth_ptr, align=4)
+
+        watch_name = f"bf2.watch.{i}"
+        watch_fn = st.module.globals.get(watch_name)
+        if watch_fn is None:
+            watch_fn = ir.Function(st.module, ir.FunctionType(ir.VoidType(), []), name=watch_name)
+        ctx.builder.call(watch_fn, [])
+        ctx.builder.store(seg_ptr_val, cseg_ptr, align=8)
+        ctx.builder.store(slot_v, cslot_ptr, align=4)
+        ctx.builder.store(d, depth_ptr, align=4)
+        ctx.builder.branch(join_block)
+
+        ctx.builder.position_at_end(skip_block)
+        ctx.builder.branch(join_block)
+
+        ctx.builder.position_at_end(join_block)

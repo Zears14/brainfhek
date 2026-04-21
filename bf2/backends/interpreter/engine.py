@@ -286,9 +286,10 @@ class Interpreter(ASTVisitor):
             out_s = ""
             if suffix in ("i", "ir", "i64", "i64r", "idx"):
                 out_s = str(int(val))
-                if suffix == "idx": out_s += ": "
+                if suffix == "idx":
+                    out_s += ": "
             elif suffix in ("f", "fr"):
-                out_s = str(float(val))
+                out_s = format(float(val), ".17g")
             elif suffix == "s":
                 out_s = self._ptr_to_str(val) if isinstance(val, Pointer) else str(val)
             

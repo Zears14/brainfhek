@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from llvmlite import ir
+
 from bf2.core import ast as A
 from bf2.backends.llvm.emit_state import EmitState
-from bf2.backends.llvm.emit_expr import emit_expr, coerce
+from bf2.backends.llvm.emit_expr import emit_expr
 from bf2.backends.llvm.emit_mem import (
     gep, get_current_cell_ptr, emit_alloc, emit_free,
     emit_ptr_arith, emit_ptr_read, emit_ptr_write,
@@ -13,7 +15,7 @@ from bf2.backends.llvm.emit_io import emit_io
 from bf2.backends.llvm.emit_watch import (
     try_static_seg_slot, emit_maybe_watch, emit_maybe_watch_current,
 )
-from bf2.backends.llvm.types import scalar_ty, align
+from bf2.backends.llvm.types import to_ir_type, align, Int1, Int8, Int32, Pointer
 
 
 def emit_stmt(st: EmitState, stmt: A.ASTNode) -> None:
@@ -46,12 +48,28 @@ def emit_stmt(st: EmitState, stmt: A.ASTNode) -> None:
         _emit_cell_arith_ref(st, stmt)
     elif isinstance(stmt, A.CellAssignLit):
         _emit_cell_assign_lit(st, stmt)
+    elif isinstance(stmt, A.LoadOp):
+        _emit_load_op(st, stmt)
+    elif isinstance(stmt, A.StoreOp):
+        _emit_store_op(st, stmt)
+    elif isinstance(stmt, A.SwapOp):
+        _emit_swap_op(st, stmt)
     elif isinstance(stmt, A.IOStmt):
         emit_io(st, stmt)
     elif isinstance(stmt, A.LabelStmt):
-        st.lines.append(f"{stmt.name}:")
+        safe_name = stmt.name.replace('.', '_')
+        block = st.ctx.blocks.get(safe_name)
+        if block is None:
+            block = st.ctx.builder.append_basic_block(name=safe_name)
+            st.ctx.blocks[safe_name] = block
+        st.ctx.builder.position_at_end(block)
     elif isinstance(stmt, A.JumpStmt):
-        st.lines.append(f"  br label %{stmt.name}")
+        safe_name = stmt.name.replace('.', '_')
+        target_block = st.ctx.blocks.get(safe_name)
+        if target_block is None:
+            target_block = st.ctx.builder.append_basic_block(name=safe_name)
+            st.ctx.blocks[safe_name] = target_block
+        st.ctx.builder.branch(target_block)
     elif isinstance(stmt, A.PtrArith):
         emit_ptr_arith(st, stmt)
     elif isinstance(stmt, A.PtrRead):
@@ -68,224 +86,304 @@ def emit_stmt(st: EmitState, stmt: A.ASTNode) -> None:
         emit_expr(st, stmt.expr, st.ctx)
 
 
-# --- Local declarations ---
-
-
 def _emit_local_seg(st: EmitState, d: A.SegmentDecl) -> None:
-    lty = scalar_ty(d.elem_type)
-    p = "%" + st.ctx.next_temp(f"lseg.{d.name}")
-    st.alloca_lines.append(f"  {p} = alloca [{d.length} x {lty}], align {align(lty)}")
-    st.ctx.locals[d.name] = (p, f"[{d.length} x {lty}]")
-    st.seg_slots[d.name] = p
+    ctx = st.ctx
+    lty = to_ir_type(d.elem_type)
+    arr_ty = ir.ArrayType(lty, d.length)
+    ptr = ctx.hoist_alloca(arr_ty, name=ctx.next_temp(f"lseg.{d.name}"))
+    ctx.locals[d.name] = (ptr, arr_ty)
+    st.seg_slots[d.name] = ptr
+    if d.length > 0:
+        zero = ir.Constant(lty, 0)
+        for i in range(d.length):
+            idx = ir.Constant(Int32, i)
+            elem_ptr = ctx.builder.gep(ptr, [ir.Constant(Int32, 0), idx], name=ctx.next_temp("se"))
+            ctx.builder.store(zero, elem_ptr)
 
 
 def _emit_var_decl(st: EmitState, d: A.VarDecl) -> None:
-    lty = scalar_ty(d.ty)
-    p = "%" + st.ctx.next_temp(f"v.{d.name}")
-    st.alloca_lines.append(f"  {p} = alloca {lty}, align {align(lty)}")
-    st.ctx.locals[d.name] = (p, lty)
+    ctx = st.ctx
+    lty = to_ir_type(d.ty)
+    ptr = ctx.hoist_alloca(lty, name=ctx.next_temp(f"v.{d.name}"))
+    ctx.locals[d.name] = (ptr, lty)
     if d.init:
-        rv, rt = emit_expr(st, d.init, st.ctx)
-        rv = coerce(st, rv, rt, lty)
-        st.lines.append(f"  store {lty} {rv}, ptr {p}, align {align(lty)}")
+        rv, rt = emit_expr(st, d.init, ctx)
+        from bf2.backends.llvm.emit_expr import _coerce
+        rv = _coerce(st, rv, rt, lty, ctx)
+        ctx.builder.store(rv, ptr, align=align(lty))
 
 
 def _emit_ptr_decl(st: EmitState, d: A.PtrDecl) -> None:
-    p = "%" + st.ctx.next_temp(f"ptr.{d.name}")
-    st.alloca_lines.append(f"  {p} = alloca ptr, align 8")
-    st.ctx.locals[d.name] = (p, "ptr")
-    st.ctx.ptr_inner[d.name] = d.inner
+    ctx = st.ctx
+    ptr_type = to_ir_type(A.TypeRef("ptr", d.inner))
+    ptr = ctx.hoist_alloca(ptr_type, name=ctx.next_temp(f"ptr.{d.name}"))
+    ctx.locals[d.name] = (ptr, ptr_type)
+    ctx.ptr_inner[d.name] = d.inner
     if d.init:
-        rv, _ = emit_expr(st, d.init, st.ctx)
-        st.lines.append(f"  store ptr {rv}, ptr {p}, align 8")
-
-
-# --- Assignment ---
+        rv, rt = emit_expr(st, d.init, ctx)
+        if not isinstance(rt, ir.PointerType):
+            raise TypeError(f"pointer init for {d.name} must be a pointer, got {rt}")
+        if rv.type != ptr_type:
+            rv = ctx.builder.bitcast(rv, ptr_type, name=ctx.next_temp("bc"))
+        ctx.builder.store(rv, ptr)
 
 
 def _emit_assign(st: EmitState, s: A.AssignStmt) -> None:
-    ptr, ty = gep(st, s.lhs, st.ctx)
-    rv, rt = emit_expr(st, s.rhs, st.ctx)
-    rv = coerce(st, rv, rt, ty)
-    st.lines.append(f"  store {ty} {rv}, ptr {ptr}, align {align(ty)}")
+    ctx = st.ctx
+    ptr, ty = gep(st, s.lhs, ctx)
+    rv, rt = emit_expr(st, s.rhs, ctx)
+    from bf2.backends.llvm.emit_expr import _coerce
+    rv = _coerce(st, rv, rt, ty, ctx)
+    ctx.builder.store(rv, ptr, align=align(ty))
     sk = try_static_seg_slot(st, s.lhs)
-    if sk:
+    in_watch_fn = hasattr(ctx.builder, 'function') and ctx.builder.function.name.startswith("bf2.watch")
+    if sk and not in_watch_fn and not ctx.builder.block.is_terminated:
         emit_maybe_watch(st, sk[0], str(sk[1]))
 
 
-# --- Control flow ---
-
-
 def _emit_if(st: EmitState, s: A.IfStmt) -> None:
+    ctx = st.ctx
     cond_v = _emit_cond(st, s.cond)
-    l_then = st.ctx.next_temp("if.then")
-    l_else = st.ctx.next_temp("if.else")
-    l_end = st.ctx.next_temp("if.end")
 
-    st.lines.append(f"  br i1 {cond_v}, label %{l_then}, label %{l_else}")
-    st.lines.append(f"{l_then}:")
+    then_block = ctx.builder.append_basic_block(name=ctx.next_temp("if.then"))
+    else_block = ctx.builder.append_basic_block(name=ctx.next_temp("if.else"))
+    end_block = ctx.builder.append_basic_block(name=ctx.next_temp("if.end"))
+
+    ctx.builder.cbranch(cond_v, then_block, else_block)
+
+    ctx.builder.position_at_end(then_block)
     for s2 in s.then.stmts:
         emit_stmt(st, s2)
-    st.lines.append(f"  br label %{l_end}")
-    st.lines.append(f"{l_else}:")
+    if not ctx.builder.block.terminator:
+        ctx.builder.branch(end_block)
+
+    ctx.builder.position_at_end(else_block)
     if s.els:
         for s2 in s.els.stmts:
             emit_stmt(st, s2)
-    st.lines.append(f"  br label %{l_end}")
-    st.lines.append(f"{l_end}:")
+    if not ctx.builder.block.terminator:
+        ctx.builder.branch(end_block)
+
+    ctx.builder.position_at_end(end_block)
 
 
 def _emit_loop_bf(st: EmitState, s: A.LoopBF) -> None:
-    l_head = st.ctx.next_temp("loop.head")
-    l_body = st.ctx.next_temp("loop.body")
-    l_end = st.ctx.next_temp("loop.end")
+    ctx = st.ctx
+    head_block = ctx.builder.append_basic_block(name=ctx.next_temp("loop.head"))
+    body_block = ctx.builder.append_basic_block(name=ctx.next_temp("loop.body"))
+    end_block = ctx.builder.append_basic_block(name=ctx.next_temp("loop.end"))
 
-    st.lines.append(f"  br label %{l_head}")
-    st.lines.append(f"{l_head}:")
+    ctx.builder.branch(head_block)
+
+    ctx.builder.position_at_end(head_block)
     p, ty = get_current_cell_ptr(st)
-    t = "%" + st.ctx.next_temp("cv")
-    st.lines.append(f"  {t} = load {ty}, ptr {p}, align {align(ty)}")
-    is_zero = "%" + st.ctx.next_temp("iszero")
-    if ty in ("float", "double"):
-        st.lines.append(f"  {is_zero} = fcmp une {ty} {t}, 0.0")
+    t = ctx.builder.load(p, align=align(ty), name=ctx.next_temp("cv"))
+    if isinstance(ty, (ir.FloatType, ir.DoubleType)):
+        is_zero = ctx.builder.fcmp_unordered("!=", t, ir.Constant(ty, 0.0), name=ctx.next_temp("iszero"))
     else:
-        st.lines.append(f"  {is_zero} = icmp ne {ty} {t}, 0")
-    st.lines.append(f"  br i1 {is_zero}, label %{l_body}, label %{l_end}")
+        is_zero = ctx.builder.icmp_signed("!=", t, ir.Constant(ty, 0), name=ctx.next_temp("iszero"))
+    ctx.builder.cbranch(is_zero, body_block, end_block)
 
-    st.lines.append(f"{l_body}:")
+    ctx.builder.position_at_end(body_block)
     for s2 in s.body.stmts:
         emit_stmt(st, s2)
-    st.lines.append(f"  br label %{l_head}")
-    st.lines.append(f"{l_end}:")
+    ctx.builder.branch(head_block)
+
+    ctx.builder.position_at_end(end_block)
 
 
 def _emit_loop_counted(st: EmitState, s: A.LoopCounted) -> None:
     """Emit a counted loop using a phi node for the induction variable."""
-    l_head = st.ctx.next_temp("loopc.head")
-    l_body = st.ctx.next_temp("loopc.body")
-    l_end = st.ctx.next_temp("loopc.end")
+    ctx = st.ctx
+    pre_block = ctx.builder.append_basic_block(name=ctx.next_temp("loopc.pre"))
+    head_block = ctx.builder.append_basic_block(name=ctx.next_temp("loopc.head"))
+    body_block = ctx.builder.append_basic_block(name=ctx.next_temp("loopc.body"))
+    end_block = ctx.builder.append_basic_block(name=ctx.next_temp("loopc.end"))
 
-    # Record the label preceding the br so the phi can reference it
-    pre_label = st.ctx.next_temp("loopc.pre")
-    st.lines.append(f"  br label %{pre_label}")
-    st.lines.append(f"{pre_label}:")
+    ctx.builder.branch(pre_block)
 
-    st.lines.append(f"  br label %{l_head}")
-    st.lines.append(f"{l_head}:")
+    ctx.builder.position_at_end(pre_block)
+    ctx.builder.branch(head_block)
 
-    # Phi node for induction variable — avoids alloca+load+store round-trip
-    iv = "%" + st.ctx.next_temp("iv")
-    nv = "%" + st.ctx.next_temp("ne")
-    st.lines.append(f"  {iv} = phi i32 [0, %{pre_label}], [{nv}, %{l_body}]")
+    ctx.builder.position_at_end(head_block)
+    phi = ctx.builder.phi(Int32, name=ctx.next_temp("iv"))
+    phi.add_incoming(ir.Constant(Int32, 0), pre_block)
 
-    cond = "%" + st.ctx.next_temp("icond")
-    st.lines.append(f"  {cond} = icmp slt i32 {iv}, {s.count}")
-    st.lines.append(f"  br i1 {cond}, label %{l_body}, label %{l_end}")
-    st.lines.append(f"{l_body}:")
+    cond = ctx.builder.icmp_signed("<", phi, ir.Constant(Int32, s.count), name=ctx.next_temp("icond"))
+    ctx.builder.cbranch(cond, body_block, end_block)
+
+    ctx.builder.position_at_end(body_block)
     for s2 in s.body.stmts:
         emit_stmt(st, s2)
-    st.lines.append(f"  {nv} = add nsw i32 {iv}, 1")
-    st.lines.append(f"  br label %{l_head}")
-    st.lines.append(f"{l_end}:")
+    nv = ctx.builder.add(phi, ir.Constant(Int32, 1), name=ctx.next_temp("ne"), flags=["nsw"])
+    ctx.builder.branch(head_block)
+    phi.add_incoming(nv, body_block)
+
+    ctx.builder.position_at_end(end_block)
 
 
 def _emit_ret(st: EmitState, s: A.RetStmt) -> None:
+    ctx = st.ctx
+    if ctx.builder.block.is_terminated:
+        return
     if not s.value:
-        st.lines.append("  ret void")
+        ctx.builder.ret_void()
     else:
-        rv, rt = emit_expr(st, s.value, st.ctx)
-        target_ty = st.ctx.ret_ty
-        rv = coerce(st, rv, rt, target_ty)
-        st.lines.append(f"  ret {target_ty} {rv}")
-
-
-# --- Cursor / cell ops ---
+        rv, rt = emit_expr(st, s.value, ctx)
+        from bf2.backends.llvm.emit_expr import _coerce
+        rv = _coerce(st, rv, rt, ctx.ret_ty, ctx)
+        ctx.builder.ret(rv)
 
 
 def _emit_move_op(st: EmitState, s: A.MoveOp) -> None:
-    ptr, ty = gep(st, s.target, st.ctx)
-    st.ctx.cursor_type = ty
-    st.lines.append(f"  store ptr {ptr}, ptr %__cseg, align 8")
-    st.lines.append("  store i32 0, ptr %__cslot, align 4")
+    ctx = st.ctx
+    ptr, ty = gep(st, s.target, ctx)
+    ctx.cursor_type = ty
+    if "__cseg" in ctx.locals:
+        cseg_ptr, _ = ctx.locals["__cseg"]
+    else:
+        cseg_ptr = ctx.hoist_alloca(Pointer, name="__cseg")
+        ctx.locals["__cseg"] = (cseg_ptr, Pointer)
+    if "__cslot" in ctx.locals:
+        cslot_ptr, _ = ctx.locals["__cslot"]
+    else:
+        cslot_ptr = ctx.hoist_alloca(Int32, name="__cslot")
+        ctx.locals["__cslot"] = (cslot_ptr, Int32)
+    ptr_cast = ctx.builder.bitcast(ptr, Pointer, name="cseg_cast")
+    ctx.builder.store(ptr_cast, cseg_ptr)
+    ctx.builder.store(ir.Constant(Int32, 0), cslot_ptr)
 
 
 def _emit_move_rel(st: EmitState, s: A.MoveRel) -> None:
-    cv = "%" + st.ctx.next_temp("idx")
-    st.lines.append(f"  {cv} = load i32, ptr %__cslot, align 4")
-    nv = "%" + st.ctx.next_temp("nidx")
-    st.lines.append(f"  {nv} = add nsw i32 {cv}, {s.delta}")
-    st.lines.append(f"  store i32 {nv}, ptr %__cslot, align 4")
+    ctx = st.ctx
+    if "__cslot" in ctx.locals:
+        cslot_ptr, _ = ctx.locals["__cslot"]
+    else:
+        cslot_ptr = ctx.hoist_alloca(Int32, name="__cslot")
+        ctx.locals["__cslot"] = (cslot_ptr, Int32)
+    cv = ctx.builder.load(cslot_ptr, name=ctx.next_temp("idx"))
+    nv = ctx.builder.add(cv, ir.Constant(Int32, s.delta), name=ctx.next_temp("nidx"), flags=["nsw"])
+    ctx.builder.store(nv, cslot_ptr)
 
 
 def _emit_cell_arith(st: EmitState, s: A.CellArith) -> None:
+    ctx = st.ctx
     p, ty = get_current_cell_ptr(st)
-    v = "%" + st.ctx.next_temp("val")
-    st.lines.append(f"  {v} = load {ty}, ptr {p}, align {align(ty)}")
+    v = ctx.builder.load(p, align=align(ty), name=ctx.next_temp("val"))
     amount = s.amount if s.amount is not None else 1
-    nv = "%" + st.ctx.next_temp("nv")
-    if ty in ("float", "double"):
-        op = {"+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv"}[s.op]
-        st.lines.append(f"  {nv} = {op} {ty} {v}, {float(amount)}")
+    if isinstance(ty, (ir.FloatType, ir.DoubleType)):
+        fp_ops = {"+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv"}
+        op = fp_ops[s.op]
+        result = getattr(ctx.builder, op)(v, ir.Constant(ty, float(amount)), name=ctx.next_temp("nv"))
     else:
-        op = {"+": "add", "-": "sub", "*": "mul", "/": "sdiv"}[s.op]
-        st.lines.append(f"  {nv} = {op} nsw {ty} {v}, {int(amount)}")
-    st.lines.append(f"  store {ty} {nv}, ptr {p}, align {align(ty)}")
+        int_ops = {"+": "add", "-": "sub", "*": "mul", "/": "sdiv"}
+        op = int_ops[s.op]
+        flags = ["nsw"] if s.op in ("+", "-", "*") else []
+        result = ctx.builder.add(v, ir.Constant(ty, int(amount)), name=ctx.next_temp("nv"), flags=flags) if s.op == "+" else (
+            ctx.builder.sub(v, ir.Constant(ty, int(amount)), name=ctx.next_temp("nv"), flags=flags) if s.op == "-" else (
+            ctx.builder.mul(v, ir.Constant(ty, int(amount)), name=ctx.next_temp("nv"), flags=flags) if s.op == "*" else
+            ctx.builder.sdiv(v, ir.Constant(ty, int(amount)), name=ctx.next_temp("nv"), flags=flags)
+        ))
+    ctx.builder.store(result, p, align=align(ty))
     emit_maybe_watch_current(st)
 
 
 def _emit_cell_arith_ref(st: EmitState, s: A.CellArithRef) -> None:
-    p, ty = gep(st, s.target, st.ctx)
-    v = "%" + st.ctx.next_temp("val")
-    st.lines.append(f"  {v} = load {ty}, ptr {p}, align {align(ty)}")
+    ctx = st.ctx
+    p, ty = gep(st, s.target, ctx)
+    v = ctx.builder.load(p, align=align(ty), name=ctx.next_temp("val"))
     amount = s.amount if s.amount is not None else 1
-    nv = "%" + st.ctx.next_temp("nv")
-    if ty in ("float", "double"):
-        op = {"+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv"}[s.op]
-        st.lines.append(f"  {nv} = {op} {ty} {v}, {float(amount)}")
+    if isinstance(ty, (ir.FloatType, ir.DoubleType)):
+        fp_ops = {"+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv"}
+        op = fp_ops[s.op]
+        result = getattr(ctx.builder, op)(v, ir.Constant(ty, float(amount)), name=ctx.next_temp("nv"))
     else:
-        op = {"+": "add", "-": "sub", "*": "mul", "/": "sdiv"}[s.op]
-        st.lines.append(f"  {nv} = {op} nsw {ty} {v}, {int(amount)}")
-    st.lines.append(f"  store {ty} {nv}, ptr {p}, align {align(ty)}")
+        int_ops = {"+": "add", "-": "sub", "*": "mul", "/": "sdiv"}
+        op = int_ops[s.op]
+        flags = ["nsw"] if s.op in ("+", "-", "*") else []
+        result = ctx.builder.add(v, ir.Constant(ty, int(amount)), name=ctx.next_temp("nv"), flags=flags) if s.op == "+" else (
+            ctx.builder.sub(v, ir.Constant(ty, int(amount)), name=ctx.next_temp("nv"), flags=flags) if s.op == "-" else (
+            ctx.builder.mul(v, ir.Constant(ty, int(amount)), name=ctx.next_temp("nv"), flags=flags) if s.op == "*" else
+            ctx.builder.sdiv(v, ir.Constant(ty, int(amount)), name=ctx.next_temp("nv"), flags=flags)
+        ))
+    ctx.builder.store(result, p, align=align(ty))
     sk = try_static_seg_slot(st, s.target)
     if sk:
         emit_maybe_watch(st, sk[0], str(sk[1]))
 
 
 def _emit_cell_assign_lit(st: EmitState, s: A.CellAssignLit) -> None:
+    ctx = st.ctx
     p, ty = get_current_cell_ptr(st)
-    if ty in ("float", "double"):
-        st.lines.append(f"  store {ty} {float(s.value)}, ptr {p}, align {align(ty)}")
-    elif ty == "i1":
-        st.lines.append(f"  store i1 {'1' if s.value else '0'}, ptr {p}, align 1")
+    if isinstance(ty, (ir.FloatType, ir.DoubleType)):
+        ctx.builder.store(ir.Constant(ty, float(s.value)), p, align=align(ty))
+    elif ty == Int1:
+        ctx.builder.store(ir.Constant(Int1, 1 if s.value else 0), p, align=1)
     else:
-        st.lines.append(f"  store {ty} {int(s.value)}, ptr {p}, align {align(ty)}")
+        ctx.builder.store(ir.Constant(ty, int(s.value)), p, align=align(ty))
     emit_maybe_watch_current(st)
 
 
-# --- Condition emission ---
+def _emit_load_op(st: EmitState, s: A.LoadOp) -> None:
+    ctx = st.ctx
+    src_ptr, src_ty = gep(st, s.src, ctx)
+    src_val = ctx.builder.load(src_ptr, align=align(src_ty), name=ctx.next_temp("load"))
+    dst_ptr, dst_ty = get_current_cell_ptr(st)
+    from bf2.backends.llvm.emit_expr import _coerce
+    src_val = _coerce(st, src_val, src_ty, dst_ty, ctx)
+    ctx.builder.store(src_val, dst_ptr, align=align(dst_ty))
 
 
-def _emit_cond(st: EmitState, s: A.Cond) -> str:
+def _emit_store_op(st: EmitState, s: A.StoreOp) -> None:
+    ctx = st.ctx
+    src_ptr, src_ty = get_current_cell_ptr(st)
+    src_val = ctx.builder.load(src_ptr, align=align(src_ty), name=ctx.next_temp("storev"))
+    dst_ptr, dst_ty = gep(st, s.dst, ctx)
+    from bf2.backends.llvm.emit_expr import _coerce
+    src_val = _coerce(st, src_val, src_ty, dst_ty, ctx)
+    ctx.builder.store(src_val, dst_ptr, align=align(dst_ty))
+    sk = try_static_seg_slot(st, s.dst)
+    in_watch_fn = ctx.builder.function.name.startswith("bf2.watch")
+    if sk and not in_watch_fn and not ctx.builder.block.is_terminated:
+        emit_maybe_watch(st, sk[0], str(sk[1]))
+
+
+def _emit_swap_op(st: EmitState, s: A.SwapOp) -> None:
+    ctx = st.ctx
+    other_ptr, other_ty = gep(st, s.other, ctx)
+    other_val = ctx.builder.load(other_ptr, align=align(other_ty), name=ctx.next_temp("swap.other"))
+    cell_ptr, cell_ty = get_current_cell_ptr(st)
+    cell_val = ctx.builder.load(cell_ptr, align=align(cell_ty), name=ctx.next_temp("swap.cell"))
+    from bf2.backends.llvm.emit_expr import _coerce
+    store_other = _coerce(st, cell_val, cell_ty, other_ty, ctx)
+    store_cell = _coerce(st, other_val, other_ty, cell_ty, ctx)
+    ctx.builder.store(store_other, other_ptr, align=align(other_ty))
+    ctx.builder.store(store_cell, cell_ptr, align=align(cell_ty))
+    sk = try_static_seg_slot(st, s.other)
+    in_watch_fn = ctx.builder.function.name.startswith("bf2.watch")
+    if sk and not in_watch_fn and not ctx.builder.block.is_terminated:
+        emit_maybe_watch(st, sk[0], str(sk[1]))
+
+
+def _emit_cond(st: EmitState, s: A.Cond) -> ir.Value:
     """Emit a cursor condition check and return the i1 SSA result."""
+    ctx = st.ctx
     p, ty = get_current_cell_ptr(st)
-    v = "%" + st.ctx.next_temp("cv")
-    st.lines.append(f"  {v} = load {ty}, ptr {p}, align {align(ty)}")
-    t = "%" + st.ctx.next_temp("cond")
-    is_fp = ty in ("float", "double")
+    v = ctx.builder.load(p, align=align(ty), name=ctx.next_temp("cv"))
+    is_fp = isinstance(ty, (ir.FloatType, ir.DoubleType))
     if is_fp:
         op_map = {
-            ">0": "fcmp ogt", "<0": "fcmp olt", "==0": "fcmp oeq", "!=0": "fcmp une",
-            ">N": "fcmp ogt", "<N": "fcmp olt", "==N": "fcmp oeq", "!=N": "fcmp une",
+            ">0": "ogt", "<0": "olt", "==0": "oeq", "!=0": "une",
+            ">N": "ogt", "<N": "olt", "==N": "oeq", "!=N": "une",
         }
         op = op_map[s.kind]
         imm = float(s.imm) if "N" in s.kind else 0.0
-        st.lines.append(f"  {t} = {op} {ty} {v}, {imm}")
+        return ctx.builder.fcmp_unordered(op, v, ir.Constant(ty, imm), name=ctx.next_temp("cond"))
     else:
         op_map = {
-            ">0": "icmp sgt", "<0": "icmp slt", "==0": "icmp eq", "!=0": "icmp ne",
-            ">N": "icmp sgt", "<N": "icmp slt", "==N": "icmp eq", "!=N": "icmp ne",
+            ">0": ">", "<0": "<", "==0": "==", "!=0": "!=",
+            ">N": ">", "<N": "<", "==N": "==", "!=N": "!=",
         }
         op = op_map[s.kind]
         imm = s.imm if "N" in s.kind else 0
-        st.lines.append(f"  {t} = {op} {ty} {v}, {imm}")
-    return t
+        return ctx.builder.icmp_signed(op, v, ir.Constant(ty, imm), name=ctx.next_temp("cond"))

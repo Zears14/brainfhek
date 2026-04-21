@@ -11,7 +11,7 @@ from bf2.compiler.parser import parse_source
 from bf2.compiler.preprocess import Preprocessor, PreprocessError
 from bf2.compiler.typechecker import check_module
 from bf2.backends.interpreter.engine import Interpreter
-from bf2.backends.llvm.emitter import LLVMEmitterVisitor
+from bf2.backends.llvm.emitter import emit_llvm_ir
 from bf2.backends.llvm.emit_mem import LLVMGenError
 from bf2.cli import parse_compile_args
 
@@ -144,14 +144,15 @@ def main(argv: list[str] | None = None) -> int:
 
             # Emit LLVM IR
             target = opts.target or _detect_target()
-            emitter = LLVMEmitterVisitor(mod, target)
-            ir = emitter.emit()
+            module = emit_llvm_ir(mod, target)
 
             # LIRO passes (optional, off by default)
             if opts.liro_enabled:
                 from bf2.liro.runner import resolve_liro_spec, run_liros
                 pass_names = resolve_liro_spec(opts.liro_spec)
-                ir = run_liros(ir, pass_names)
+                ir = run_liros(str(module), pass_names)
+            else:
+                ir = str(module)
 
             # LLVM opt (optional, -O1 through -O3)
             if opts.opt_level > 0:

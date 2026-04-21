@@ -462,7 +462,7 @@ class Parser:
         if t.kind == "FLOAT":
             return float(t.value)
         if t.kind == "STRING":
-            return A.StringLit(str(t.value), loc)
+            return A.StringLit(str(t.value), t.loc)
         if t.kind == "KEYWORD":
             return t.value == "true"
         raise BF2SyntaxError(f"Literal expected, got {t}", self._loc())

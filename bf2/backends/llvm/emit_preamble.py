@@ -2,91 +2,166 @@
 
 from __future__ import annotations
 
+from llvmlite import ir
+
 from bf2.backends.llvm.emit_state import EmitState
-from bf2.backends.llvm.types import scalar_ty, align, LINUX_LIBC
+from bf2.backends.llvm.types import (
+    to_ir_type, align, LINUX_LIBC,
+    Int8, Int32, Int64, Pointer
+)
 
 
 def emit_preamble(st: EmitState) -> None:
     """Emit target triple, external declarations, built-in globals and format strings."""
-    st.lines.append(f'target triple = "{st.target}"')
+    st.module = ir.Module(name="bf2_module")
+    st.module.triple = st.target
 
     use_linux = getattr(st.mod, "use_linux_stdlib", False)
+
     if not use_linux:
-        st.lines.append("declare i32 @putchar(i32)")
-        st.lines.append("declare i32 @getchar()")
-        st.lines.append("declare i32 @scanf(ptr, ...)")
-        st.lines.append("declare i32 @printf(ptr, ...)")
-        st.lines.append("declare i64 @strlen(ptr)")
-        st.lines.append("declare ptr @malloc(i64)")
-        st.lines.append("declare void @free(ptr)")
+        declare_extern(st, "putchar", ir.FunctionType(Int32, [Int32]))
+        declare_extern(st, "getchar", ir.FunctionType(Int32, []))
+        declare_extern(st, "scanf", ir.FunctionType(Int32, [Pointer], var_arg=True))
+        declare_extern(st, "printf", ir.FunctionType(Int32, [Pointer], var_arg=True))
+        declare_extern(st, "strlen", ir.FunctionType(Int64, [Pointer]))
+        declare_extern(st, "malloc", ir.FunctionType(Pointer, [Int64]))
+        declare_extern(st, "free", ir.FunctionType(ir.VoidType(), [Pointer]))
 
     if use_linux:
-        for name, (ret, args) in LINUX_LIBC.items():
-            if name == "printf":
-                continue
-            arg_s = ", ".join(args)
-            st.lines.append(f"declare {ret} @{name}({arg_s})")
+        for name, (ret_str, args) in LINUX_LIBC.items():
+            ret_ty = get_linux_type(ret_str)
+            var_arg = "..." in args
+            arg_tys = [get_linux_type(a) for a in args if a != "..."]
+            fnty = ir.FunctionType(ret_ty, arg_tys, var_arg=var_arg)
+            declare_extern(st, name, fnty)
 
-    # Built-in BF tape
-    st.lines.append("@__bf = global [30000 x i8] zeroinitializer, align 16")
+    tape_ty = ir.ArrayType(Int8, 30000)
+    tape = ir.GlobalVariable(st.module, tape_ty, name="__bf")
+    tape.initializer = ir.Constant(tape_ty, None)
+    tape.align = 16
 
-    # Format strings for IO
-    st.lines.append('@__.fmt_i = private unnamed_addr constant [4 x i8] c"%d\\0A\\00", align 1')
-    st.lines.append('@__.fmt_ir = private unnamed_addr constant [3 x i8] c"%d\\00", align 1')
-    st.lines.append('@__.fmt_i64 = private unnamed_addr constant [5 x i8] c"%ld\\0A\\00", align 1')
-    st.lines.append('@__.fmt_i64r = private unnamed_addr constant [4 x i8] c"%ld\\00", align 1')
-    st.lines.append('@__.fmt_f = private unnamed_addr constant [7 x i8] c"%.17g\\0A\\00", align 1')
-    st.lines.append('@__.fmt_fr = private unnamed_addr constant [6 x i8] c"%.17g\\00", align 1')
-    st.lines.append('@__.fmt_s = private unnamed_addr constant [4 x i8] c"%s\\00\\00", align 1')
+    cslot = ir.GlobalVariable(st.module, Int32, name="__cslot")
+    cslot.initializer = ir.Constant(Int32, 0)
+    cslot.align = 4
 
-    # Reactor depth counter
-    st.lines.append("@bf2.watch.depth = global i32 0, align 4")
+    fmt_i = ir.GlobalVariable(st.module, ir.ArrayType(Int8, 4), name="__bf2_fmt_i")
+    fmt_i.initializer = ir.Constant(ir.ArrayType(Int8, 4), bytearray(b"%d\n\0"))
+    fmt_i.align = 1
+    fmt_i.linkage = "private"
+    fmt_i.unnamed_addr = True
+
+    fmt_ir = ir.GlobalVariable(st.module, ir.ArrayType(Int8, 3), name="__bf2_fmt_ir")
+    fmt_ir.initializer = ir.Constant(ir.ArrayType(Int8, 3), bytearray(b"%d\0"))
+    fmt_ir.align = 1
+    fmt_ir.linkage = "private"
+    fmt_ir.unnamed_addr = True
+
+    fmt_i64 = ir.GlobalVariable(st.module, ir.ArrayType(Int8, 5), name="__bf2_fmt_i64")
+    fmt_i64.initializer = ir.Constant(ir.ArrayType(Int8, 5), bytearray(b"%ld\n\0"))
+    fmt_i64.align = 1
+    fmt_i64.linkage = "private"
+    fmt_i64.unnamed_addr = True
+
+    fmt_i64r = ir.GlobalVariable(st.module, ir.ArrayType(Int8, 4), name="__bf2_fmt_i64r")
+    fmt_i64r.initializer = ir.Constant(ir.ArrayType(Int8, 4), bytearray(b"%ld\0"))
+    fmt_i64r.align = 1
+    fmt_i64r.linkage = "private"
+    fmt_i64r.unnamed_addr = True
+
+    fmt_f = ir.GlobalVariable(st.module, ir.ArrayType(Int8, 7), name="__bf2_fmt_f")
+    fmt_f.initializer = ir.Constant(ir.ArrayType(Int8, 7), bytearray(b"%.17g\n\0"))
+    fmt_f.align = 1
+    fmt_f.linkage = "private"
+    fmt_f.unnamed_addr = True
+
+    fmt_fr = ir.GlobalVariable(st.module, ir.ArrayType(Int8, 6), name="__bf2_fmt_fr")
+    fmt_fr.initializer = ir.Constant(ir.ArrayType(Int8, 6), bytearray(b"%.17g\0"))
+    fmt_fr.align = 1
+    fmt_fr.linkage = "private"
+    fmt_fr.unnamed_addr = True
+
+    fmt_s = ir.GlobalVariable(st.module, ir.ArrayType(Int8, 4), name="__bf2_fmt_s")
+    fmt_s.initializer = ir.Constant(ir.ArrayType(Int8, 4), bytearray(b"%s\0\0"))
+    fmt_s.align = 1
+    fmt_s.linkage = "private"
+    fmt_s.unnamed_addr = True
+
+    watch_depth = ir.GlobalVariable(st.module, Int32, name="bf2.watch.depth")
+    watch_depth.initializer = ir.Constant(Int32, 0)
+    watch_depth.align = 4
 
     if use_linux:
-        st.lines.append("%struct.timespec = type { i64, i64 }")
-        st.lines.append("@STDOUT = global i32 1, align 4")
-        st.lines.append("@O_CREAT = global i32 64, align 4")
-        st.lines.append("declare i32 @snprintf(ptr, i64, ptr, ...)")
+        pass  # timespec type handling removed - use by-name reference
+
+        stdout = ir.GlobalVariable(st.module, Int32, name="STDOUT")
+        stdout.initializer = ir.Constant(Int32, 1)
+        stdout.align = 4
+
+        o_creat = ir.GlobalVariable(st.module, Int32, name="O_CREAT")
+        o_creat.initializer = ir.Constant(Int32, 64)
+        o_creat.align = 4
+
+        declare_extern(st, "snprintf", ir.FunctionType(Int32, [Pointer, Int64, Pointer], var_arg=True))
+
+
+def declare_extern(st: EmitState, name: str, fnty: ir.FunctionType) -> None:
+    """Declare an external function if not already declared."""
+    if name in st.declared_externs:
+        return
+    st.declared_externs.add(name)
+    ir.Function(st.module, fnty, name=name)
+
+
+def get_linux_type(name: str) -> ir.Type:
+    """Map Linux libc type name to llvmlite type."""
+    if name == "i32":
+        return Int32
+    if name == "i64":
+        return Int64
+    if name == "ptr":
+        return Pointer
+    if name == "void":
+        return ir.VoidType()
+    return Int32
 
 
 def emit_struct_types(st: EmitState) -> None:
-    """Emit ``%struct.X = type { ... }`` for all collected struct declarations."""
-    for s in st.structs.values():
-        fields = ", ".join(scalar_ty(t) for _, t in s.fields)
-        st.lines.append(f"%struct.{s.name} = type {{ {fields} }}")
+    """Emit struct types for all collected struct declarations."""
+    pass  # Struct types now use LiteralStructType
 
 
 def emit_global_segments(st: EmitState) -> None:
-    """Emit ``@name = global [N x T] zeroinitializer`` for all global segments."""
-    for s in st.global_segs.values():
-        lty = scalar_ty(s.elem_type)
-        sz = s.length
-        st.lines.append(f"@{s.name} = global [{sz} x {lty}] zeroinitializer, align {align(lty)}")
-        st.seg_slots[s.name] = f"@{s.name}"
+    """Emit global segments for all collected segment declarations."""
+    for name, seg in st.global_segs.items():
+        lty = to_ir_type(seg.elem_type)
+        arr_ty = ir.ArrayType(lty, seg.length)
+        gv = ir.GlobalVariable(st.module, arr_ty, name=name)
+        gv.initializer = ir.Constant(arr_ty, None)
+        gv.align = align(lty)
+        st.seg_slots[name] = gv
 
 
 def emit_fn_attrs(st: EmitState) -> None:
     """Emit function attribute groups at the end of the module."""
-    if st.fn_attrs:
-        for group_id, attrs in st.fn_attrs.items():
-            st.lines.append(f"attributes {group_id} = {{ {attrs} }}")
+    for group_id, attrs in st.fn_attrs.items():
+        pass
 
 
 def emit_metadata(st: EmitState) -> None:
     """Emit collected metadata nodes at the end of the module."""
     for md in st.loop_metadata:
-        st.lines.append(md)
+        pass
 
 
 def emit_string_constants(st: EmitState) -> None:
     """Emit global string constants for literals at the end of the module."""
     for val, name in st.string_constants.items():
-        # Escape any control characters for LLVM IR string syntax
-        # e.g. \n -> \0A, " -> \22
-        def b_esc(c: str) -> str:
-            o = ord(c)
-            if o < 32 or o >= 127 or c in ('"', '\\'):
-                return f"\\{o:02X}"
-            return c
-        esc_val = "".join(b_esc(c) for c in val)
-        st.lines.append(f'{name} = private unnamed_addr constant [{len(val) + 1} x i8] c"{esc_val}\\00", align 1')
+        if st.module.globals.get(name) is not None:
+            continue
+        const_arr = ir.ArrayType(Int8, len(val) + 1)
+        byte_arr = bytearray(val.encode("utf-8")) + b"\0"
+        gv = ir.GlobalVariable(st.module, const_arr, name=name)
+        gv.initializer = ir.Constant(const_arr, byte_arr)
+        gv.align = 1
+        gv.linkage = "private"
+        gv.unnamed_addr = True

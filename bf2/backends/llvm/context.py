@@ -1,16 +1,25 @@
 from __future__ import annotations
-from typing import Dict, List, Tuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
 from bf2.core import ast as A
+from bf2.backends.llvm.types import to_ir_type, Int8
+
+if TYPE_CHECKING:
+    from llvmlite import ir
+
 
 class LLVMGenError(Exception):
     def __init__(self, msg: str, loc: Optional[A.SourceLoc] = None):
         super().__init__(msg)
         self.loc = loc
 
+
 class LLVMContext:
     """Emission state for a single function/reactor in the LLVM backend."""
+
     __slots__ = (
         "ret_ty",
+        "builder",
         "locals",
         "cursor_slot_ptr",
         "cursor_seg",
@@ -25,11 +34,13 @@ class LLVMContext:
         "next_temp_id",
         "next_label_id",
         "cursor_type",
+        "blocks",
     )
 
-    def __init__(self, ret_ty: str) -> None:
-        self.ret_ty = ret_ty
-        self.locals: Dict[str, Tuple[str, str]] = {}
+    def __init__(self, ret_ty: A.TypeRef, builder: ir.IRBuilder | None = None) -> None:
+        self.ret_ty = to_ir_type(ret_ty) if isinstance(ret_ty, A.TypeRef) else ret_ty
+        self.builder = builder
+        self.locals: Dict[str, tuple[ir.Value, ir.Type]] = {}
         self.cursor_slot_ptr = ""
         self.cursor_seg = "__bf"
         self.ptr_struct: Dict[str, str] = {}
@@ -37,12 +48,13 @@ class LLVMContext:
         self.local_seg_alloca: Dict[str, str] = {}
         self.local_structs: Dict[str, A.StructDecl] = {}
         self.label_map: Dict[str, str] = {}
-        self.pending_labels: List[str] = []
+        self.pending_labels: list[str] = []
         self.ptr_inner: Dict[str, A.TypeRef] = {}
         self.static_cslot: Optional[int] = 0
         self.next_temp_id = 0
         self.next_label_id = 0
-        self.cursor_type = "i8"
+        self.cursor_type: ir.Type = Int8
+        self.blocks: Dict[str, Any] = {}
 
     def next_temp(self, suffix: str = "") -> str:
         """Returns a name WITHOUT the leading %."""
@@ -61,3 +73,16 @@ class LLVMContext:
 
     def set_static_cslot(self, slot: int) -> None:
         self.static_cslot = slot
+
+    def hoist_alloca(self, ty: ir.Type, name: str = "") -> ir.Value:
+        """Create an alloca in the entry block of the current function."""
+        # Find entry block
+        entry = self.builder.function.entry_basic_block
+        # Create a temporary builder at the start of the entry block
+        with self.builder.goto_block(entry):
+            # Insert at the beginning of the block
+            if entry.instructions:
+                self.builder.position_before(entry.instructions[0])
+            else:
+                self.builder.position_at_start(entry)
+            return self.builder.alloca(ty, name=name)

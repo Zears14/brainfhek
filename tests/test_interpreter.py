@@ -1,5 +1,8 @@
 
+from pathlib import Path
+
 from bf2.backends.interpreter.engine import Interpreter, is_classic_bf, run_bf_classic
+from bf2.compiler.preprocess import preprocess
 from bf2.compiler.parser import parse_source
 from bf2.compiler.typechecker import check_module
 
@@ -73,3 +76,12 @@ def test_main_returns():
     check_module(mod)
     ip = Interpreter(mod)
     assert ip.call_fn(next(x for x in mod.items if getattr(x, "name", None) == "main"), []) == 42
+
+
+def test_struct_point_float_output_matches_llvm_format():
+    p = Path(__file__).resolve().parents[1] / "examples" / "struct_point.bf2"
+    text, meta = preprocess(p.read_text(encoding="utf-8"), main_path=p)
+    mod = parse_source(text, use_linux_stdlib=meta.use_linux_stdlib)
+    check_module(mod)
+    ip = Interpreter(mod)
+    assert ip.run() == "5\n"

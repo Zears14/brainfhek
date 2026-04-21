@@ -1,17 +1,19 @@
 """LLVM IR emitter — thin orchestrator delegating to sub-modules.
 
 Public API:
-    emit_llvm_ir(mod, target) -> str
+    emit_llvm_ir(mod, target) -> ir.Module
 """
 
 from __future__ import annotations
 
 import platform
 
+from llvmlite import ir
+
 from bf2.core import ast as A
 from bf2.backends.llvm.context import LLVMContext
 from bf2.backends.llvm.emit_state import EmitState
-from bf2.backends.llvm.types import scalar_ty
+from bf2.backends.llvm.types import to_ir_type, align, get_struct_type, Int8, Int32, Pointer
 from bf2.backends.llvm.emit_preamble import (
     emit_preamble, emit_struct_types, emit_global_segments,
     emit_fn_attrs, emit_metadata, emit_string_constants
@@ -27,18 +29,14 @@ class LLVMEmitterVisitor:
         self.st = EmitState(
             mod=mod,
             target=target,
-            ctx=LLVMContext("void"),
         )
-        # Register attribute group #0 = nounwind
         self.st.fn_attrs["#0"] = "nounwind"
 
-    def emit(self) -> str:
+    def emit(self) -> ir.Module:
         st = self.st
 
-        # 1. Preamble
         emit_preamble(st)
 
-        # 2. Collect top-level declarations
         for item in st.mod.items:
             if isinstance(item, A.StructDecl):
                 st.structs[item.name] = item
@@ -51,84 +49,89 @@ class LLVMEmitterVisitor:
                 if sk:
                     st.watches.append((sk[0], sk[1], item))
 
-        # 3. Struct types
         emit_struct_types(st)
+        for name, decl in st.structs.items():
+            field_types = [f[1] for f in decl.fields]
+            get_struct_type(name, field_types, st.module)
 
-        # 4. Global segments
         emit_global_segments(st)
 
-        # 5. Functions
         for f in st.fns.values():
             self._emit_function(f)
 
-        # 6. Reactors
         for i, (seg, slot, r) in enumerate(st.watches):
             emit_watch_fn(st, i, seg, slot, r)
 
-        # 7. Attribute groups, metadata and string constants (appended at module end)
         emit_fn_attrs(st)
         emit_metadata(st)
         emit_string_constants(st)
 
-        return "\n".join(st.lines)
+        return st.module
 
     def _emit_function(self, f: A.FunctionDef) -> None:
         st = self.st
-        ret_ty = scalar_ty(f.ret)
-        st.ctx = LLVMContext(ret_ty)
-        st.alloca_lines = []
-        args = ", ".join(f"{scalar_ty(t)} %{n}" for n, t in f.params)
-        st.lines.append(f"define {ret_ty} @{f.name}({args}) #0 {{")
-        st.lines.append("entry:")
-        insertion_point = len(st.lines)
+        ret_ty = to_ir_type(f.ret)
 
-        # Local cursor allocas (promotable by mem2reg)
-        st.alloca_lines.append("  %__cseg = alloca ptr, align 8")
-        st.alloca_lines.append("  %__cslot = alloca i32, align 4")
+        arg_tys = [to_ir_type(t) for _, t in f.params]
+        fnty = ir.FunctionType(ret_ty, arg_tys)
+        fn = ir.Function(st.module, fnty, name=f.name)
+        entry_block = fn.append_basic_block(name="entry")
+        builder = ir.IRBuilder(entry_block)
 
-        # Alloc parameters
-        for n, t in f.params:
-            lty = scalar_ty(t)
-            p = "%" + st.ctx.next_temp(f"p.{n}")
-            st.alloca_lines.append(f"  {p} = alloca {lty}, align {lty_align(lty)}")
-            st.lines.append(f"  store {lty} %{n}, ptr {p}, align {lty_align(lty)}")
-            st.ctx.locals[n] = (p, lty)
+        st.ctx = LLVMContext(f.ret, builder)
+        ctx = st.ctx
+
+        cseg_ptr = ctx.hoist_alloca(Pointer, name="__cseg")
+        cslot_ptr = ctx.hoist_alloca(Int32, name="__cslot")
+        ctx.locals["__cseg"] = (cseg_ptr, Pointer)
+        ctx.locals["__cslot"] = (cslot_ptr, Int32)
+
+        cseg_gv = st.module.globals.get("__bf")
+        if cseg_gv is None:
+            cseg_gv = ir.GlobalVariable(st.module, ir.ArrayType(Int8, 30000), name="__bf")
+            cseg_gv.initializer = ir.Constant(ir.ArrayType(Int8, 30000), None)
+            cseg_gv.align = 16
+
+        cseg_typed = builder.bitcast(cseg_gv, Pointer, name="__bf_cast")
+        builder.store(cseg_typed, cseg_ptr)
+        builder.store(ir.Constant(Int32, 0), cslot_ptr)
+
+        st.ctx.cursor_type = Int8
+
+        for i, (n, t) in enumerate(f.params):
+            lty = to_ir_type(t)
+            arg = fn.args[i]
+            ptr = ctx.hoist_alloca(lty, name=ctx.next_temp(f"p.{n}"))
+            builder.store(arg, ptr)
+            ctx.locals[n] = (ptr, lty)
             if t.name == "ptr":
                 st.ctx.ptr_inner[n] = t.inner or A.TypeRef("i8")
 
         if f.params:
             first_n = f.params[0][0]
             first_p, _ = st.ctx.locals[first_n]
-            st.lines.append(f"  store ptr {first_p}, ptr %__cseg, align 8")
-            st.lines.append("  store i32 0, ptr %__cslot, align 4")
-            st.ctx.cursor_type = scalar_ty(f.params[0][1])
-        else:
-            st.lines.append("  store ptr @__bf, ptr %__cseg, align 8")
-            st.lines.append("  store i32 0, ptr %__cslot, align 4")
-            st.ctx.cursor_type = "i8"
+            first_p_cast = builder.bitcast(first_p, Pointer, name=st.ctx.next_temp("cseg_cast"))
+            builder.store(first_p_cast, cseg_ptr)
+            builder.store(ir.Constant(Int32, 0), cslot_ptr)
+            st.ctx.cursor_type = to_ir_type(f.params[0][1])
 
         for stmt_node in f.body.stmts:
             emit_stmt(st, stmt_node)
 
-        # Hoist allocas to entry block
-        st.lines[insertion_point:insertion_point] = st.alloca_lines
+        if ret_ty == ir.VoidType():
+            if not builder.block.terminator:
+                builder.ret_void()
+        elif not builder.block.terminator:
+            builder.ret(ir.Constant(ret_ty, 0))
 
-        if ret_ty == "void":
-            st.lines.append("  ret void")
-        elif not st.lines[-1].strip().startswith("ret "):
-            st.lines.append(f"  ret {ret_ty} 0")
 
-        st.lines.append("}")
+def emit_llvm_ir(mod: A.Module, target: str | None = None) -> ir.Module:
+    """Public API: emit LLVM IR for a BF2 module (returns ir.Module)."""
+    if target is None:
+        target = f"{platform.machine()}-pc-linux-gnu"
+    return LLVMEmitterVisitor(mod, target).emit()
 
 
 def lty_align(lty: str) -> int:
     """Alignment helper using the types module."""
-    from bf2.backends.llvm.types import align
     return align(lty)
-
-
-def emit_llvm_ir(mod: A.Module, target: str | None = None) -> str:
-    """Public API: emit LLVM IR for a BF2 module."""
-    if target is None:
-        target = f"{platform.machine()}-pc-linux-gnu"
-    return LLVMEmitterVisitor(mod, target).emit()

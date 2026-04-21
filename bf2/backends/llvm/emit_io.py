@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from llvmlite import ir
+
 from bf2.core import ast as A
 from bf2.backends.llvm.emit_state import EmitState
 from bf2.backends.llvm.emit_mem import get_current_cell_ptr
 from bf2.backends.llvm.emit_expr import emit_expr
-from bf2.backends.llvm.types import align
+from bf2.backends.llvm.types import align, Int8, Int32, Int64, Pointer
 
 
 def emit_io(st: EmitState, s: A.IOStmt) -> None:
@@ -16,24 +18,24 @@ def emit_io(st: EmitState, s: A.IOStmt) -> None:
     if s.kind == ".":
         _emit_putchar(st, use_linux)
     elif s.kind == ".i" and s.expr:
-        _emit_print_expr(st, s.expr, "@__.fmt_i", use_linux)
+        _emit_print_expr(st, s.expr, "__bf2_fmt_i", use_linux)
     elif s.kind == ".ir" and s.expr:
-        _emit_print_expr(st, s.expr, "@__.fmt_ir", use_linux)
+        _emit_print_expr(st, s.expr, "__bf2_fmt_ir", use_linux)
     elif s.kind == ".i64" and s.expr:
-        _emit_print_expr(st, s.expr, "@__.fmt_i64", use_linux)
+        _emit_print_expr(st, s.expr, "__bf2_fmt_i64", use_linux)
     elif s.kind == ".i64r" and s.expr:
-        _emit_print_expr(st, s.expr, "@__.fmt_i64r", use_linux)
+        _emit_print_expr(st, s.expr, "__bf2_fmt_i64r", use_linux)
     elif (s.kind == ".f" or s.kind == ".fr") and s.expr:
-        fmt = "@__.fmt_f" if s.kind == ".f" else "@__.fmt_fr"
+        fmt = "__bf2_fmt_f" if s.kind == ".f" else "__bf2_fmt_fr"
         _emit_print_expr(st, s.expr, fmt, use_linux)
     elif s.kind == ".s" and s.expr:
-        _emit_print_expr(st, s.expr, "@__.fmt_s", use_linux)
+        _emit_print_expr(st, s.expr, "__bf2_fmt_s", use_linux)
     elif s.kind == ".i":
-        _emit_print_cell(st, "@__.fmt_i", use_linux)
+        _emit_print_cell(st, "__bf2_fmt_i", use_linux)
     elif s.kind == ".ir":
-        _emit_print_cell(st, "@__.fmt_ir", use_linux)
+        _emit_print_cell(st, "__bf2_fmt_ir", use_linux)
     elif s.kind == ".f":
-        _emit_print_cell(st, "@__.fmt_f", use_linux)
+        _emit_print_cell(st, "__bf2_fmt_f", use_linux)
     elif s.kind == ".s":
         _emit_print_string(st, use_linux)
     elif s.kind == ",":
@@ -41,98 +43,162 @@ def emit_io(st: EmitState, s: A.IOStmt) -> None:
 
 
 def _emit_putchar(st: EmitState, use_linux: bool) -> None:
+    ctx = st.ctx
     p, ty = get_current_cell_ptr(st)
-    v = "%" + st.ctx.next_temp("ov")
-    st.lines.append(f"  {v} = load {ty}, ptr {p}, align {align(ty)}")
+    v = ctx.builder.load(p, name=ctx.next_temp("ov"))
+
     if use_linux:
-        b = "%" + st.ctx.next_temp("buf")
-        st.alloca_lines.append(f"  {b} = alloca i8, align 1")
-        if ty == "i8":
-            st.lines.append(f"  store i8 {v}, ptr {b}, align 1")
+        buf = ctx.hoist_alloca(Int8, name=ctx.next_temp("buf"))
+        if isinstance(ty, ir.IntType) and ty.width > 8:
+            tv = ctx.builder.trunc(v, Int8, name=ctx.next_temp("trunc"))
+            ctx.builder.store(tv, buf)
         else:
-            tv = "%" + st.ctx.next_temp("trunc")
-            st.lines.append(f"  {tv} = trunc {ty} {v} to i8")
-            st.lines.append(f"  store i8 {tv}, ptr {b}, align 1")
-        st.lines.append(f"  call i64 @write(i32 1, ptr {b}, i64 1)")
+            ctx.builder.store(v, buf)
+        write_fn = _get_or_declare(st, "write", ir.FunctionType(Int64, [Int32, Pointer, Int64]))
+        ctx.builder.call(write_fn, [
+            ir.Constant(Int32, 1),
+            buf,
+            ir.Constant(Int64, 1)
+        ])
     else:
-        if ty == "i32":
-            st.lines.append(f"  call i32 @putchar(i32 {v})")
+        putchar_fn = _get_or_declare(st, "putchar", ir.FunctionType(Int32, [Int32]))
+        if isinstance(ty, ir.IntType):
+            if ty.width == 32:
+                ctx.builder.call(putchar_fn, [v])
+            elif ty.width < 32:
+                ev = ctx.builder.zext(v, Int32, name=ctx.next_temp("ext"))
+                ctx.builder.call(putchar_fn, [ev])
+            else:
+                ev = ctx.builder.trunc(v, Int32, name=ctx.next_temp("trunc"))
+                ctx.builder.call(putchar_fn, [ev])
         else:
-            ev = "%" + st.ctx.next_temp("ext")
-            st.lines.append(f"  {ev} = zext {ty} {v} to i32")
-            st.lines.append(f"  call i32 @putchar(i32 {ev})")
+            ev = ctx.builder.fptosi(v, Int32, name=ctx.next_temp("ext"))
+            ctx.builder.call(putchar_fn, [ev])
+
+
+def _get_or_declare(st: EmitState, name: str, fnty: ir.FunctionType) -> ir.Function:
+    fn = st.module.globals.get(name)
+    if fn is None:
+        fn = ir.Function(st.module, fnty, name=name)
+    return fn
+
+
+def _get_or_create_string_constant(st: EmitState, value: str) -> ir.GlobalVariable:
+    name = st.get_string_ident(value)
+    gv = st.module.globals.get(name)
+    if gv is not None:
+        return gv
+
+    const_arr = ir.ArrayType(Int8, len(value) + 1)
+    byte_arr = bytearray(value.encode("utf-8")) + b"\0"
+    gv = ir.GlobalVariable(st.module, const_arr, name=name)
+    gv.initializer = ir.Constant(const_arr, byte_arr)
+    gv.align = 1
+    gv.linkage = "private"
+    gv.unnamed_addr = True
+    return gv
 
 
 def _emit_print_expr(st: EmitState, expr: A.Expr, fmt: str, use_linux: bool) -> None:
+    ctx = st.ctx
     if isinstance(expr, A.StringLit):
-        s_id = st.get_string_ident(expr.value)
+        s_gv = _get_or_create_string_constant(st, expr.value)
         if use_linux:
             ln = len(expr.value)
-            st.lines.append(f"  call i64 @write(i32 1, ptr {s_id}, i64 {ln})")
+            write_fn = _get_or_declare(st, "write", ir.FunctionType(Int64, [Int32, Pointer, Int64]))
+            s_cast = ctx.builder.bitcast(s_gv, Pointer, name=ctx.next_temp("scast"))
+            ctx.builder.call(write_fn, [
+                ir.Constant(Int32, 1),
+                s_cast,
+                ir.Constant(Int64, ln)
+            ])
         else:
-            st.lines.append(f"  call i32 (ptr, ...) @printf(ptr {s_id})")
+            s_cast = ctx.builder.bitcast(s_gv, Pointer, name=ctx.next_temp("scast"))
+            printf_fn = _get_or_declare(st, "printf", ir.FunctionType(Int32, [Pointer], var_arg=True))
+            ctx.builder.call(printf_fn, [s_cast])
         return
 
-    v, vty = emit_expr(st, expr, st.ctx)
+    v, vty = emit_expr(st, expr, ctx)
     if use_linux:
         _emit_snprintf_write(st, v, vty, fmt)
     else:
-        st.lines.append(f"  call i32 (ptr, ...) @printf(ptr {fmt}, {vty} {v})")
+        fmt_gv = st.module.globals.get(fmt)
+        if fmt_gv is None:
+            return
+        fmt_cast = ctx.builder.bitcast(fmt_gv, Pointer, name=ctx.next_temp("fmtcast"))
+        printf_fn = _get_or_declare(st, "printf", ir.FunctionType(Int32, [Pointer], var_arg=True))
+        ctx.builder.call(printf_fn, [fmt_cast, v])
 
 
 def _emit_print_cell(st: EmitState, fmt: str, use_linux: bool) -> None:
+    ctx = st.ctx
     p, ty = get_current_cell_ptr(st)
-    v = "%" + st.ctx.next_temp("ov")
-    st.lines.append(f"  {v} = load {ty}, ptr {p}, align {align(ty)}")
+    v = ctx.builder.load(p, align=align(ty), name=ctx.next_temp("ov"))
     if use_linux:
         _emit_snprintf_write(st, v, ty, fmt)
     else:
-        st.lines.append(f"  call i32 (ptr, ...) @printf(ptr {fmt}, {ty} {v})")
+        fmt_gv = st.module.globals.get(fmt)
+        printf_fn = _get_or_declare(st, "printf", ir.FunctionType(Int32, [Pointer], var_arg=True))
+        ctx.builder.call(printf_fn, [fmt_gv, v])
 
 
 def _emit_print_string(st: EmitState, use_linux: bool) -> None:
+    ctx = st.ctx
     p, ty = get_current_cell_ptr(st)
-    v = "%" + st.ctx.next_temp("ov")
-    st.lines.append(f"  {v} = load {ty}, ptr {p}, align {align(ty)}")
+    v = ctx.builder.load(p, align=align(ty), name=ctx.next_temp("ov"))
     if use_linux:
-        ln = "%" + st.ctx.next_temp("len")
-        st.lines.append(f"  {ln} = call i64 @strlen(ptr {v})")
-        st.lines.append(f"  call i64 @write(i32 1, ptr {v}, i64 {ln})")
+        strlen_fn = _get_or_declare(st, "strlen", ir.FunctionType(Int64, [Pointer]))
+        ln = ctx.builder.call(strlen_fn, [v], name=ctx.next_temp("len"))
+        write_fn = _get_or_declare(st, "write", ir.FunctionType(Int64, [Int32, Pointer, Int64]))
+        ctx.builder.call(write_fn, [ir.Constant(Int32, 1), v, ln])
     else:
-        st.lines.append(f"  call i32 (ptr, ...) @printf(ptr @__.fmt_s, {ty} {v})")
+        fmt_gv = st.module.globals.get("__bf2_fmt_s")
+        printf_fn = _get_or_declare(st, "printf", ir.FunctionType(Int32, [Pointer], var_arg=True))
+        ctx.builder.call(printf_fn, [fmt_gv, v])
 
 
 def _emit_getchar(st: EmitState, use_linux: bool) -> None:
+    ctx = st.ctx
     p, ty = get_current_cell_ptr(st)
     if use_linux:
-        b = "%" + st.ctx.next_temp("buf")
-        st.alloca_lines.append(f"  {b} = alloca i8, align 1")
-        st.lines.append(f"  call i64 @read(i32 0, ptr {b}, i64 1)")
-        rv = "%" + st.ctx.next_temp("rv")
-        st.lines.append(f"  {rv} = load i8, ptr {b}, align 1")
-        if ty == "i8":
-            st.lines.append(f"  store i8 {rv}, ptr {p}, align 1")
+        buf = ctx.hoist_alloca(Int8, name=ctx.next_temp("buf"))
+        read_fn = _get_or_declare(st, "read", ir.FunctionType(Int64, [Int32, Pointer, Int64]))
+        ctx.builder.call(read_fn, [ir.Constant(Int32, 0), buf, ir.Constant(Int64, 1)])
+        rv = ctx.builder.load(buf, align=1, name=ctx.next_temp("rv"))
+        if ty == Int8:
+            ctx.builder.store(rv, p, align=1)
         else:
-            tv = "%" + st.ctx.next_temp("ext")
-            st.lines.append(f"  {tv} = zext i8 {rv} to {ty}")
-            st.lines.append(f"  store {ty} {tv}, ptr {p}, align {align(ty)}")
+            tv = ctx.builder.zext(rv, ty, name=ctx.next_temp("ext"))
+            ctx.builder.store(tv, p, align=align(ty))
     else:
-        r = "%" + st.ctx.next_temp("rv")
-        st.lines.append(f"  {r} = call i32 @getchar()")
-        if ty == "i32":
-            st.lines.append(f"  store i32 {r}, ptr {p}, align 4")
+        getchar_fn = _get_or_declare(st, "getchar", ir.FunctionType(Int32, []))
+        r = ctx.builder.call(getchar_fn, [], name=ctx.next_temp("rv"))
+        if ty == Int32:
+            ctx.builder.store(r, p, align=4)
         else:
-            t = "%" + st.ctx.next_temp("tr")
-            st.lines.append(f"  {t} = trunc i32 {r} to {ty}")
-            st.lines.append(f"  store {ty} {t}, ptr {p}, align {align(ty)}")
+            t = ctx.builder.trunc(r, ty, name=ctx.next_temp("tr"))
+            ctx.builder.store(t, p, align=align(ty))
 
 
-def _emit_snprintf_write(st: EmitState, val: str, ty: str, fmt: str) -> None:
-    buf = "%" + st.ctx.next_temp("sbuf")
-    st.alloca_lines.append(f"  {buf} = alloca [64 x i8], align 1")
-    p = "%" + st.ctx.next_temp("sp")
-    st.lines.append(f"  {p} = getelementptr [64 x i8], ptr {buf}, i32 0, i32 0")
-    st.lines.append(f"  call i32 (ptr, i64, ptr, ...) @snprintf(ptr {p}, i64 64, ptr {fmt}, {ty} {val})")
-    ln = "%" + st.ctx.next_temp("slen")
-    st.lines.append(f"  {ln} = call i64 @strlen(ptr {p})")
-    st.lines.append(f"  call i64 @write(i32 1, ptr {p}, i64 {ln})")
+def _emit_snprintf_write(st: EmitState, val: ir.Value, ty: ir.Type, fmt: str) -> None:
+    ctx = st.ctx
+    buf = ctx.hoist_alloca(ir.ArrayType(Int8, 64), name=ctx.next_temp("sbuf"))
+    p = ctx.builder.gep(buf, [ir.Constant(Int32, 0), ir.Constant(Int32, 0)], name=ctx.next_temp("sp"))
+    fmt_gv = st.module.globals.get(fmt)
+    if fmt_gv is None:
+        return
+    snprintf_fn = _get_or_declare(st, "snprintf", ir.FunctionType(Int32, [Pointer, Int64, Pointer], var_arg=True))
+    p_cast = ctx.builder.bitcast(p, Pointer, name=ctx.next_temp("pcast"))
+    fmt_cast = ctx.builder.bitcast(fmt_gv, Pointer, name=ctx.next_temp("fmtcast"))
+    args = [p_cast, ir.Constant(Int64, 64), fmt_cast]
+    if ty == Int32:
+        args.append(ctx.builder.sext(val, Int64))
+    elif ty == Int8:
+        args.append(ctx.builder.zext(val, Int64))
+    else:
+        args.append(val)
+    ctx.builder.call(snprintf_fn, args)
+    strlen_fn = _get_or_declare(st, "strlen", ir.FunctionType(Int64, [Pointer]))
+    ln = ctx.builder.call(strlen_fn, [p], name=ctx.next_temp("slen"))
+    write_fn = _get_or_declare(st, "write", ir.FunctionType(Int64, [Int32, Pointer, Int64]))
+    ctx.builder.call(write_fn, [ir.Constant(Int32, 1), p, ln])
