@@ -87,6 +87,10 @@ def emit_preamble(st: EmitState) -> None:
     watch_depth.initializer = ir.Constant(Int32, 0)
     watch_depth.align = 4
 
+    watch_mask = ir.GlobalVariable(st.module, ir.IntType(64), name="bf2.watch.mask")
+    watch_mask.initializer = ir.Constant(ir.IntType(64), 0)
+    watch_mask.align = 8
+
     if use_linux:
         pass  # timespec type handling removed - use by-name reference
 
@@ -129,6 +133,7 @@ def emit_struct_types(st: EmitState) -> None:
 
 def emit_global_segments(st: EmitState) -> None:
     """Emit global segments for all collected segment declarations."""
+    from bf2.core.analysis import find_segment_deps
     for name, seg in st.global_segs.items():
         lty = to_ir_type(seg.elem_type)
         arr_ty = ir.ArrayType(lty, seg.length)
@@ -136,6 +141,21 @@ def emit_global_segments(st: EmitState) -> None:
         gv.initializer = ir.Constant(arr_ty, None)
         gv.align = align(lty)
         st.seg_slots[name] = gv
+
+        if seg.init:
+            if seg.reactive:
+                # Create a global activation flag for this link
+                active_gv = ir.GlobalVariable(st.module, ir.IntType(1), name=f"bf2.link.active.{name}")
+                active_gv.initializer = ir.Constant(ir.IntType(1), 1)
+                st.link_active_gv[name] = active_gv
+
+                deps = find_segment_deps(seg.init)
+                for d in deps:
+                    if d not in st.links:
+                        st.links[d] = []
+                    st.links[d].append(seg)
+            else:
+                st.one_time_links.append(seg)
 
 
 

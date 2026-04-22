@@ -44,12 +44,6 @@ class LLVMEmitterVisitor:
                 st.fns[item.name] = item
             elif isinstance(item, A.SegmentDecl):
                 st.global_segs[item.name] = item
-                if item.init:
-                    deps = find_segment_deps(item.init)
-                    for d in deps:
-                        if d not in st.links:
-                            st.links[d] = []
-                        st.links[d].append(item)
             elif isinstance(item, A.ReactorDef):
                 sk = try_static_seg_slot(st, item.target)
                 if sk:
@@ -112,7 +106,7 @@ class LLVMEmitterVisitor:
             ctx.locals[n] = (ptr, lty)
             if t.name == "ptr":
                 st.ctx.ptr_inner[n] = t.inner or A.TypeRef("i8")
-
+        
         if f.params:
             first_n = f.params[0][0]
             first_p, _ = st.ctx.locals[first_n]
@@ -120,6 +114,10 @@ class LLVMEmitterVisitor:
             builder.store(first_p_cast, cseg_ptr)
             builder.store(ir.Constant(Int32, 0), cslot_ptr)
             st.ctx.cursor_type = to_ir_type(f.params[0][1])
+        
+        if f.name == "main":
+            for seg in st.one_time_links:
+                self._emit_one_time_init(seg, builder)
 
         for stmt_node in f.body.stmts:
             emit_stmt(st, stmt_node)
@@ -129,6 +127,44 @@ class LLVMEmitterVisitor:
                 builder.ret_void()
         elif not builder.block.terminator:
             builder.ret(ir.Constant(ret_ty, 0))
+
+    def _emit_one_time_init(self, seg: A.SegmentDecl, builder: ir.IRBuilder) -> None:
+        """Emit code to initialize a segment once (standard 'seg' with assignment)."""
+        st = self.st
+        from bf2.backends.llvm.emit_expr import emit_expr
+        from bf2.backends.llvm.emit_expr import _coerce
+        from bf2.backends.llvm.types import Int32
+        
+        loop_cond = builder.append_basic_block(name=st.ctx.next_temp("init.cond"))
+        loop_body = builder.append_basic_block(name=st.ctx.next_temp("init.body"))
+        loop_end = builder.append_basic_block(name=st.ctx.next_temp("init.end"))
+        
+        i_ptr = builder.alloca(Int32, name=st.ctx.next_temp("init.i"))
+        builder.store(ir.Constant(Int32, 0), i_ptr)
+        builder.branch(loop_cond)
+        
+        builder.position_at_end(loop_cond)
+        i = builder.load(i_ptr)
+        cond = builder.icmp_signed("<", i, ir.Constant(Int32, seg.length))
+        builder.cbranch(cond, loop_body, loop_end)
+        
+        builder.position_at_end(loop_body)
+        from bf2.backends.llvm.emit_reactive import _bind_expr_to_index
+        bound_init = _bind_expr_to_index(seg.init, i)
+        
+        val, ty = emit_expr(st, bound_init, st.ctx)
+        lty = to_ir_type(seg.elem_type)
+        val = _coerce(st, val, ty, lty, st.ctx)
+        
+        target_ptr = st.seg_slots[seg.name]
+        dest_ptr = builder.gep(target_ptr, [ir.Constant(Int32, 0), i], inbounds=True)
+        builder.store(val, dest_ptr, align=align(lty))
+        
+        ni = builder.add(i, ir.Constant(Int32, 1))
+        builder.store(ni, i_ptr)
+        builder.branch(loop_cond)
+        
+        builder.position_at_end(loop_end)
 
 
 def emit_llvm_ir(mod: A.Module, target: str | None = None) -> ir.Module:

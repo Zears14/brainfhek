@@ -57,6 +57,8 @@ def emit_stmt(st: EmitState, stmt: A.ASTNode) -> None:
         _emit_swap_op(st, stmt)
     elif isinstance(stmt, A.IOStmt):
         emit_io(st, stmt)
+    elif isinstance(stmt, A.UnlinkStmt):
+        _emit_unlink(st, stmt)
     elif isinstance(stmt, A.LabelStmt):
         safe_name = stmt.name.replace('.', '_')
         block = st.ctx.blocks.get(safe_name)
@@ -225,7 +227,7 @@ def _emit_loop_counted(st: EmitState, s: A.LoopCounted) -> None:
         loop_md = st.module.add_metadata([])
         loop_md.operands = [loop_md]
         br.set_metadata("llvm.loop", loop_md)
-        phi.add_incoming(nv, body_block)
+        phi.add_incoming(nv, ctx.builder.block)
 
     ctx.builder.position_at_end(end_block)
 
@@ -411,3 +413,8 @@ def _emit_cond(st: EmitState, s: A.Cond) -> ir.Value:
         op = op_map[s.kind]
         imm = s.imm if "N" in s.kind else 0
         return ctx.builder.icmp_signed(op, v, ir.Constant(ty, imm), name=ctx.next_temp("cond"))
+def _emit_unlink(st: EmitState, s: A.UnlinkStmt) -> None:
+    """Disable a reactive link at runtime."""
+    active_gv = st.link_active_gv.get(s.target)
+    if active_gv is not None:
+        st.ctx.builder.store(ir.Constant(ir.IntType(1), 0), active_gv)

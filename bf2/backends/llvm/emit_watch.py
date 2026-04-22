@@ -108,18 +108,20 @@ def emit_maybe_watch(st: EmitState, seg: str, slot_v: ir.Value | str) -> None:
         join_block = ctx.builder.append_basic_block(name=ctx.next_temp(f"join.watch.{i}"))
 
         if is_static_slot:
-            depth_ptr = st.module.globals.get("bf2.watch.depth")
-            if depth_ptr is None:
-                depth_ptr = ir.GlobalVariable(st.module, Int32, name="bf2.watch.depth")
-                depth_ptr.initializer = ir.Constant(Int32, 0)
+            mask_ptr = st.module.globals.get("bf2.watch.mask")
+            if mask_ptr is None:
+                mask_ptr = ir.GlobalVariable(st.module, ir.IntType(64), name="bf2.watch.mask")
+                mask_ptr.initializer = ir.Constant(ir.IntType(64), 0)
 
-            d = ctx.builder.load(depth_ptr, align=4, name=ctx.next_temp("depth"))
-            can_fire = ctx.builder.icmp_signed("<", d, ir.Constant(Int32, 8), name=ctx.next_temp("can_fire"))
+            mask = ctx.builder.load(mask_ptr, align=8, name=ctx.next_temp("mask"))
+            bit = ir.Constant(ir.IntType(64), 1 << i)
+            already_firing = ctx.builder.and_(mask, bit, name=ctx.next_temp("already_firing"))
+            can_fire = ctx.builder.icmp_signed("==", already_firing, ir.Constant(ir.IntType(64), 0), name=ctx.next_temp("can_fire"))
             ctx.builder.cbranch(can_fire, fire_block, skip_block)
 
             ctx.builder.position_at_end(fire_block)
-            ndepth = ctx.builder.add(d, ir.Constant(Int32, 1), name=ctx.next_temp("ndepth"))
-            ctx.builder.store(ndepth, depth_ptr, align=4)
+            nmask = ctx.builder.or_(mask, bit, name=ctx.next_temp("nmask"))
+            ctx.builder.store(nmask, mask_ptr, align=8)
 
             watch_name = f"bf2.watch.{i}"
             watch_fn = st.module.globals.get(watch_name)
@@ -127,7 +129,7 @@ def emit_maybe_watch(st: EmitState, seg: str, slot_v: ir.Value | str) -> None:
                 watch_fn = ir.Function(st.module, ir.FunctionType(ir.VoidType(), []), name=watch_name)
             watch_fn.attributes.add("nounwind")
             ctx.builder.call(watch_fn, [])
-            ctx.builder.store(d, depth_ptr, align=4)
+            ctx.builder.store(mask, mask_ptr, align=8)
             ctx.builder.branch(join_block)
 
             ctx.builder.position_at_end(skip_block)
@@ -137,19 +139,21 @@ def emit_maybe_watch(st: EmitState, seg: str, slot_v: ir.Value | str) -> None:
         else:
             is_slot = ctx.builder.icmp_signed("==", slot_v_ir, ir.Constant(Int32, wslot), name=ctx.next_temp("is_slot"))
 
-            depth_ptr = st.module.globals.get("bf2.watch.depth")
-            if depth_ptr is None:
-                depth_ptr = ir.GlobalVariable(st.module, Int32, name="bf2.watch.depth")
-                depth_ptr.initializer = ir.Constant(Int32, 0)
+            mask_ptr = st.module.globals.get("bf2.watch.mask")
+            if mask_ptr is None:
+                mask_ptr = ir.GlobalVariable(st.module, ir.IntType(64), name="bf2.watch.mask")
+                mask_ptr.initializer = ir.Constant(ir.IntType(64), 0)
 
-            d = ctx.builder.load(depth_ptr, align=4, name=ctx.next_temp("depth"))
-            can_fire = ctx.builder.icmp_signed("<", d, ir.Constant(Int32, 8), name=ctx.next_temp("can_fire"))
-            must_fire = ctx.builder.and_(is_slot, can_fire, name=ctx.next_temp("must_fire"))
+            mask = ctx.builder.load(mask_ptr, align=8, name=ctx.next_temp("mask"))
+            bit = ir.Constant(ir.IntType(64), 1 << i)
+            already_firing = ctx.builder.and_(mask, bit, name=ctx.next_temp("already_firing"))
+            not_firing = ctx.builder.icmp_signed("==", already_firing, ir.Constant(ir.IntType(64), 0), name=ctx.next_temp("not_firing"))
+            must_fire = ctx.builder.and_(is_slot, not_firing, name=ctx.next_temp("must_fire"))
             ctx.builder.cbranch(must_fire, fire_block, skip_block)
 
             ctx.builder.position_at_end(fire_block)
-            ndepth = ctx.builder.add(d, ir.Constant(Int32, 1), name=ctx.next_temp("ndepth"))
-            ctx.builder.store(ndepth, depth_ptr, align=4)
+            nmask = ctx.builder.or_(mask, bit, name=ctx.next_temp("nmask"))
+            ctx.builder.store(nmask, mask_ptr, align=8)
 
             watch_name = f"bf2.watch.{i}"
             watch_fn = st.module.globals.get(watch_name)
@@ -157,7 +161,7 @@ def emit_maybe_watch(st: EmitState, seg: str, slot_v: ir.Value | str) -> None:
                 watch_fn = ir.Function(st.module, ir.FunctionType(ir.VoidType(), []), name=watch_name)
             watch_fn.attributes.add("nounwind")
             ctx.builder.call(watch_fn, [])
-            ctx.builder.store(d, depth_ptr, align=4)
+            ctx.builder.store(mask, mask_ptr, align=8)
             ctx.builder.branch(join_block)
 
             ctx.builder.position_at_end(skip_block)
@@ -190,14 +194,16 @@ def emit_maybe_watch_current(st: EmitState) -> None:
         is_slot = ctx.builder.icmp_signed("==", slot_v, ir.Constant(Int32, 0), name=ctx.next_temp("is_slot"))
         match = ctx.builder.and_(is_seg, is_slot, name=ctx.next_temp("match"))
 
-        depth_ptr = st.module.globals.get("bf2.watch.depth")
-        if depth_ptr is None:
-            depth_ptr = ir.GlobalVariable(st.module, Int32, name="bf2.watch.depth")
-            depth_ptr.initializer = ir.Constant(Int32, 0)
+        mask_ptr = st.module.globals.get("bf2.watch.mask")
+        if mask_ptr is None:
+            mask_ptr = ir.GlobalVariable(st.module, ir.IntType(64), name="bf2.watch.mask")
+            mask_ptr.initializer = ir.Constant(ir.IntType(64), 0)
 
-        d = ctx.builder.load(depth_ptr, align=4, name=ctx.next_temp("depth"))
-        can_fire = ctx.builder.icmp_signed("<", d, ir.Constant(Int32, 8), name=ctx.next_temp("can_fire"))
-        must_fire = ctx.builder.and_(match, can_fire, name=ctx.next_temp("must_fire"))
+        mask = ctx.builder.load(mask_ptr, align=8, name=ctx.next_temp("mask"))
+        bit = ir.Constant(ir.IntType(64), 1 << i)
+        already_firing = ctx.builder.and_(mask, bit, name=ctx.next_temp("already_firing"))
+        not_firing = ctx.builder.icmp_signed("==", already_firing, ir.Constant(ir.IntType(64), 0), name=ctx.next_temp("not_firing"))
+        must_fire = ctx.builder.and_(match, not_firing, name=ctx.next_temp("must_fire"))
         
         # Prevent self-recursion
         watch_name = f"bf2.watch.{i}"
@@ -217,8 +223,8 @@ def emit_maybe_watch_current(st: EmitState) -> None:
             ctx.builder.cbranch(must_fire, fire_block, skip_block)
 
         ctx.builder.position_at_end(fire_block)
-        ndepth = ctx.builder.add(d, ir.Constant(Int32, 1), name=ctx.next_temp("ndepth"))
-        ctx.builder.store(ndepth, depth_ptr, align=4)
+        nmask = ctx.builder.or_(mask, bit, name=ctx.next_temp("nmask"))
+        ctx.builder.store(nmask, mask_ptr, align=8)
 
         watch_name = f"bf2.watch.{i}"
         watch_fn = st.module.globals.get(watch_name)
@@ -228,7 +234,7 @@ def emit_maybe_watch_current(st: EmitState) -> None:
         ctx.builder.call(watch_fn, [])
         ctx.builder.store(seg_ptr_val, cseg_ptr, align=8)
         ctx.builder.store(slot_v, cslot_ptr, align=4)
-        ctx.builder.store(d, depth_ptr, align=4)
+        ctx.builder.store(mask, mask_ptr, align=8)
         ctx.builder.branch(join_block)
 
         ctx.builder.position_at_end(skip_block)

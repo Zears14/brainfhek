@@ -45,14 +45,17 @@ def _emit_link_update(st: EmitState, decl: A.SegmentDecl, index_v: ir.Value, vis
 
     ctx = st.ctx
     
-    # We need to emit the expression but override how segment names are resolved.
-    # Normally 'a' in 'a + b' might mean the whole segment or a pointer.
-    # For linked segments, it means 'a[index_v]'.
-    
-    # We'll use a temporary context or a flag to signal this special resolution.
-    # Or we can just transform the expression internally? 
-    # Let's try transforming the expression into one where segments are explicitly indexed.
-    
+    # Check if the link is still active (runtime)
+    active_gv = st.link_active_gv.get(decl.name)
+    if active_gv is not None:
+        active = ctx.builder.load(active_gv, name=ctx.next_temp(f"link.active.{decl.name}"))
+        with ctx.builder.if_then(active):
+            _emit_link_update_logic(st, decl, index_v, visited)
+    else:
+        _emit_link_update_logic(st, decl, index_v, visited)
+
+def _emit_link_update_logic(st: EmitState, decl: A.SegmentDecl, index_v: ir.Value, visited: Set[str]) -> None:
+    ctx = st.ctx
     bound_expr = _bind_expr_to_index(decl.init, index_v)
     
     from bf2.backends.llvm.emit_expr import emit_expr
@@ -68,6 +71,10 @@ def _emit_link_update(st: EmitState, decl: A.SegmentDecl, index_v: ir.Value, vis
     
     val = _coerce(st, val, ty, lty, ctx)
     ctx.builder.store(val, dest_ptr, align=align(lty))
+    
+    # Trigger watches on the linked segment update
+    from bf2.backends.llvm.emit_watch import emit_maybe_watch
+    emit_maybe_watch(st, decl.name, index_v)
     
     # Recurse: if this linked segment is also a source for others
     emit_reactive_updates(st, decl.name, index_v, visited)

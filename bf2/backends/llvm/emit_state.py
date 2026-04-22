@@ -30,6 +30,8 @@ class EmitState:
     fns: dict[str, A.FunctionDef] = field(default_factory=dict)
     global_segs: dict[str, A.SegmentDecl] = field(default_factory=dict)
     links: dict[str, list[A.SegmentDecl]] = field(default_factory=dict)
+    one_time_links: list[A.SegmentDecl] = field(default_factory=list)
+    link_active_gv: dict[str, Any] = field(default_factory=dict)
     watches: list[tuple[str, int, A.ReactorDef]] = field(default_factory=list)
     watch_blocks: dict[str, Any] = field(default_factory=dict)
 

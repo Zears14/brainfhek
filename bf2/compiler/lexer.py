@@ -24,6 +24,8 @@ KEYWORDS = frozenset(
         "type",
         "ptr",
         "ptrread",
+        "seglink",
+        "unlink",
         "do",
         "true",
         "false",

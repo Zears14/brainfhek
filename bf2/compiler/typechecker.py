@@ -33,12 +33,12 @@ class TypeChecker(ASTVisitor):
                 if item.name in self.segs:
                      raise BF2TypeError(f"redefinition of segment '{item.name}'", item.loc)
                 self.segs[item.name] = (item.elem_type, item.length)
+                if item.reactive and item.init:
+                    self.mod_links[item.name] = find_segment_deps(item.init)
             elif isinstance(item, A.FunctionDef):
                 if item.name in self.fns:
                      raise BF2TypeError(f"redefinition of function '{item.name}'", item.loc)
                 self.fns[item.name] = ([(p[0], p[1]) for p in item.params], item.ret)
-            if isinstance(item, A.SegmentDecl) and item.init:
-                self.mod_links[item.name] = find_segment_deps(item.init)
         
         # Check items
         for item in self.mod.items:
@@ -204,6 +204,11 @@ class TypeChecker(ASTVisitor):
              self.diag.warn("unsafe", f"large allocation of {node.size} bytes", node.loc)
         if node.name:
              self._declare(node.name, A.TypeRef("ptr", node.ty), node.loc)
+
+    def visit_unlink_stmt(self, node: A.UnlinkStmt) -> None:
+        if node.target not in self.segs:
+             raise BF2TypeError(f"unknown segment: {node.target}", node.loc)
+        # We might want to warn if unlinking a non-reactive segment
 
     def visit_call_stmt(self, node: A.CallStmt) -> None:
         self.visit(node.call)

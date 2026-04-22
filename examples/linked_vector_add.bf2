@@ -1,7 +1,7 @@
 // Linked Vector Addition Example
 seg a { f32[4] }
 seg b { f32[4] }
-seg c { f32[4] } = a + b
+seglink c { f32[4] } = a + b
 
 fn main() -> i32 {
     a[0] = 1.0

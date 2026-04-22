@@ -10,9 +10,10 @@ INT       ::= ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7'|'8'|'9')+
 FLOAT     ::= INT '.' INT
 STRING    ::= '"' [^"]* '"'
 TYPE      ::= 'i8' | 'i16' | 'i32' | 'i64' | 'f32' | 'f64' | 'bool'
-KEYWORD   ::= 'fn' | 'ret' | 'call' | 'seg' | 'struct' | 'watch' | 'load' 
-            | 'store' | 'swap' | 'label' | 'jump' | 'if' | 'else' | 'alloc' 
-            | 'as' | 'free' | 'type' | 'ptr' | 'ptrread' | 'do' | 'true' | 'false'
+KEYWORD   ::= 'fn' | 'ret' | 'call' | 'seg' | 'seglink' | 'struct' | 'watch' 
+            | 'load' | 'store' | 'swap' | 'label' | 'jump' | 'if' | 'else' 
+            | 'alloc' | 'as' | 'free' | 'type' | 'ptr' | 'ptrread' | 'unlink'
+            | 'do' | 'true' | 'false'
 ```
 
 ## Top-Level Structure
@@ -21,6 +22,7 @@ KEYWORD   ::= 'fn' | 'ret' | 'call' | 'seg' | 'struct' | 'watch' | 'load'
 Module       ::= TopLevel*
 
 TopLevel     ::= SegDecl
+               | SegLinkDecl
                | StructDecl
                | FunctionDef
                | WatchDef
@@ -34,6 +36,7 @@ TypeRef      ::= 'ptr' '<' TypeRef '>'
                | IDENT
 
 SegDecl      ::= 'seg' IDENT '{' TypeRef ('[' INT ']')? '}' ('=' Expr)?
+SegLinkDecl  ::= 'seglink' IDENT '{' TypeRef ('[' INT ']')? '}' '=' Expr
 
 StructDecl   ::= 'struct' IDENT '{' StructField* '}'
 StructField  ::= IDENT ':' TypeRef ','?
@@ -76,6 +79,9 @@ Stmt         ::= SegDecl
                | MoveRelStmt
                | CellArithStmt
                | CellAssignLitStmt
+               | UnlinkStmt
+
+UnlinkStmt   ::= 'unlink' IDENT
 
 IfStmt       ::= 'if' '(' Cond ')' Block ('else' Block)?
 Cond         ::= '>' INT
@@ -115,11 +121,16 @@ CellAssignLitStmt ::= '=' (INT | FLOAT | 'true' | 'false')
 RefExpr      ::= '@' IDENT
                | IDENT ('[' Expr ']' | '.' IDENT)*
 
-Expr         ::= AddExpr
+Expr         ::= BitOrExpr
+BitOrExpr    ::= BitXorExpr ('|' BitXorExpr)*
+BitXorExpr   ::= BitAndExpr ('^' BitAndExpr)*
+BitAndExpr   ::= ShiftExpr ('&' ShiftExpr)*
+ShiftExpr    ::= AddExpr (('<<' | '>>') AddExpr)*
 AddExpr      ::= MulExpr (('+' | '-') MulExpr)*
 MulExpr      ::= UnaryExpr (('*' | '/') UnaryExpr)*
 
 UnaryExpr    ::= '-' UnaryExpr
+               | '~' UnaryExpr
                | '*' IDENT
                | '&' RefExpr
                | PrimaryExpr
@@ -142,3 +153,5 @@ CallArgs     ::= Expr (',' Expr)*
 - **Classic Memory Moving**: `<` and `>` parse precisely as relative movements across the continuous array segment.
 - **Reference Chaining**: `RefExpr` supports `seg[expr]` bindings and implicit C-like struct dot chaining (e.g., `pt.x`).
 - **Pointers**: `*`, `&`, and `ptrread`/`ptr` constructs enable C-level explicit pointer semantics.
+- **Reactive System**: `seglink` creates a permanent mathematical dependency, while `seg` with `=` is a one-time copy at startup.
+- **Dynamic Unlinking**: The `unlink` statement can be used to stop a `seglink` dependency at runtime.

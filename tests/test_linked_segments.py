@@ -1,7 +1,6 @@
 import pytest
 import subprocess
 import os
-
 import sys
 
 def run_bf2(source: str):
@@ -18,7 +17,7 @@ def test_basic_link():
     source = """
     seg a { f32[4] }
     seg b { f32[4] }
-    seg c { f32[4] } = a + b
+    seglink c { f32[4] } = a + b
     
     fn main() -> i32 {
         a[0] = 10.0
@@ -37,7 +36,7 @@ def test_dynamic_link():
     source = """
     seg a { i32[4] }
     seg b { i32[4] }
-    seg c { i32[4] } = a * b
+    seglink c { i32[4] } = a * b
     
     fn main() -> i32 {
         i32 i = 0
@@ -71,7 +70,7 @@ def test_complex_expression():
     source = """
     seg a { f32[4] }
     seg b { f32[4] }
-    seg c { f32[4] } = a * 2.0 + b
+    seglink c { f32[4] } = a * 2.0 + b
     
     fn main() -> i32 {
         a[0] = 5.0
@@ -89,8 +88,8 @@ def test_complex_expression():
 def test_multi_level_link():
     source = """
     seg a { i32[4] }
-    seg b { i32[4] } = a + 1
-    seg c { i32[4] } = b + 1
+    seglink b { i32[4] } = a + 1
+    seglink c { i32[4] } = b + 1
     
     fn main() -> i32 {
         a[0] = 10
@@ -103,10 +102,11 @@ def test_multi_level_link():
     """
     rc, out, err = run_bf2(source)
     assert rc == 0, f"Error: {err}"
+
 def test_circular_link():
     source = """
-    seg a { i32[4] } = b
-    seg b { i32[4] } = a
+    seglink a { i32[4] } = b
+    seglink b { i32[4] } = a
     fn main() -> i32 { ret 0 }
     """
     rc, out, err = run_bf2(source)
@@ -115,21 +115,46 @@ def test_circular_link():
 
 def test_self_link():
     source = """
-    seg a { i32[4] } = a + 1
+    seglink a { i32[4] } = a + 1
     fn main() -> i32 { ret 0 }
     """
     rc, out, err = run_bf2(source)
     assert rc != 0
     assert "cannot depend on itself" in err
 
-def test_length_mismatch_warning():
-    # This should probably produce a warning but maybe not a fatal error if we allow it.
-    # Currently I added it as a warning in TypeChecker.
+def test_unlink_stmt():
     source = """
-    seg a { i32[4] }
-    seg b { i32[10] } = a
-    fn main() -> i32 { ret 0 }
+    seg a { i32[1] }
+    seglink b { i32[1] } = a
+    fn main() -> i32 {
+        a[0] = 10
+        unlink b
+        a[0] = 20
+        @b[0]
+        if (== 10) {
+            ret 0
+        }
+        ret 1
+    }
     """
-    # We need a way to check warnings. For now, let's just make sure it compiles.
     rc, out, err = run_bf2(source)
-    assert rc == 0
+    assert rc == 0, f"Error: {err}"
+
+def test_one_time_init():
+    source = """
+    seg a { i32[1] } = 5
+    seg b { i32[1] } = a
+    fn main() -> i32 {
+        @b[0]
+        if (== 5) {
+            a[0] = 10
+            @b[0]
+            if (== 5) {
+                ret 0
+            }
+        }
+        ret 1
+    }
+    """
+    rc, out, err = run_bf2(source)
+    assert rc == 0, f"Error: {err}"

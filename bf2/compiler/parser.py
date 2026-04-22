@@ -38,7 +38,9 @@ class Parser:
         if self._match("KEYWORD", "fn"):
             return self._parse_function()
         if self._match("KEYWORD", "seg"):
-            return self._parse_segment()
+            return self._parse_segment(reactive=False)
+        if self._match("KEYWORD", "seglink"):
+            return self._parse_segment(reactive=True)
         if self._match("KEYWORD", "struct"):
             return self._parse_struct()
         if self._match("KEYWORD", "watch"):
@@ -66,7 +68,7 @@ class Parser:
         ret = self._parse_type()
         return A.FunctionDef(name, params, ret, self._parse_block(), loc)
 
-    def _parse_segment(self) -> A.SegmentDecl:
+    def _parse_segment(self, reactive: bool = False) -> A.SegmentDecl:
         loc = self._loc()
         name = self._consume("IDENT", "seg name").value
         self._consume("SYMBOL", "{")
@@ -79,7 +81,9 @@ class Parser:
         init = None
         if self._match("SYMBOL", "="):
             init = self._parse_expression()
-        return A.SegmentDecl(name, ty, n, init, loc)
+        elif reactive:
+            raise BF2SyntaxError(f"seglink '{name}' must have an initial expression", loc)
+        return A.SegmentDecl(name, ty, n, init, reactive, loc)
 
     def _parse_struct(self) -> A.StructDecl:
         loc = self._loc()
@@ -159,6 +163,9 @@ class Parser:
             if t.value == "free":
                 self._adv()
                 return A.FreeStmt(self._consume("IDENT", "ptr").value, loc)
+            if t.value == "unlink":
+                self._adv()
+                return A.UnlinkStmt(self._consume("IDENT", "target").value, loc)
             if t.value == "ptrread":
                 self._adv()
                 return A.PtrRead(self._consume("IDENT", "ptr").value, loc)
