@@ -6,9 +6,14 @@ from llvmlite import ir
 
 from bf2.core import ast as A
 
-_TYPE_CACHE: dict = {}
 _STRUCT_FIELDS: dict = {}
 _IDENTIFIED_STRUCTS: dict = {}
+
+
+def clear_type_caches():
+    """Clear global type caches to prevent pollution across compilations."""
+    _STRUCT_FIELDS.clear()
+    _IDENTIFIED_STRUCTS.clear()
 
 Int1 = ir.IntType(1)
 Int8 = ir.IntType(8)
@@ -20,44 +25,32 @@ Double = ir.DoubleType()
 Pointer = ir.PointerType(ir.IntType(8))
 
 
-def _type_cache_key(t: A.TypeRef | None) -> tuple | None:
-    if t is None:
-        return None
-    return (t.name, _type_cache_key(t.inner))
 
 
 def to_ir_type(t: A.TypeRef) -> ir.Type:
     """Map a BF2 TypeRef to an llvmlite ir.Type."""
-    key = _type_cache_key(t)
-    if key in _TYPE_CACHE:
-        return _TYPE_CACHE[key]
-
     if t.name == "ptr":
         pointee = to_ir_type(t.inner or A.TypeRef("i8"))
-        result = ir.PointerType(pointee)
-    elif t.name == "i8":
-        result = Int8
-    elif t.name == "bool":
-        result = Int1
-    elif t.name == "i16":
-        result = Int16
-    elif t.name == "i32":
-        result = Int32
-    elif t.name == "i64":
-        result = Int64
-    elif t.name == "f32":
-        result = Float
-    elif t.name == "f64":
-        result = Double
-    elif t.name == "void":
-        result = ir.VoidType()
-    elif t.name in _IDENTIFIED_STRUCTS:
-        result = _IDENTIFIED_STRUCTS[t.name]
-    else:
-        result = Int32
-
-    _TYPE_CACHE[key] = result
-    return result
+        return ir.PointerType(pointee)
+    if t.name == "i8":
+        return Int8
+    if t.name == "bool":
+        return Int1
+    if t.name == "i16":
+        return Int16
+    if t.name == "i32":
+        return Int32
+    if t.name == "i64":
+        return Int64
+    if t.name == "f32":
+        return Float
+    if t.name == "f64":
+        return Double
+    if t.name == "void":
+        return ir.VoidType()
+    if t.name in _IDENTIFIED_STRUCTS:
+        return _IDENTIFIED_STRUCTS[t.name]
+    return Int32
 
 
 def get_struct_type(name: str, fields: list[A.TypeRef], module: ir.Module) -> ir.Type:

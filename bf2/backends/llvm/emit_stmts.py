@@ -15,7 +15,7 @@ from bf2.backends.llvm.emit_io import emit_io
 from bf2.backends.llvm.emit_watch import (
     try_static_seg_slot, emit_maybe_watch, emit_maybe_watch_current,
 )
-from bf2.backends.llvm.types import to_ir_type, align, Int1, Int8, Int32, Pointer
+from bf2.backends.llvm.types import to_ir_type, align, Int1, Int32, Pointer
 
 
 def emit_stmt(st: EmitState, stmt: A.ASTNode) -> None:
@@ -94,11 +94,7 @@ def _emit_local_seg(st: EmitState, d: A.SegmentDecl) -> None:
     ctx.locals[d.name] = (ptr, arr_ty)
     st.seg_slots[d.name] = ptr
     if d.length > 0:
-        zero = ir.Constant(lty, 0)
-        for i in range(d.length):
-            idx = ir.Constant(Int32, i)
-            elem_ptr = ctx.builder.gep(ptr, [ir.Constant(Int32, 0), idx], name=ctx.next_temp("se"))
-            ctx.builder.store(zero, elem_ptr)
+        ctx.builder.store(ir.Constant(arr_ty, None), ptr, align=align(lty))
 
 
 def _emit_var_decl(st: EmitState, d: A.VarDecl) -> None:
@@ -187,7 +183,11 @@ def _emit_loop_bf(st: EmitState, s: A.LoopBF) -> None:
     ctx.builder.position_at_end(body_block)
     for s2 in s.body.stmts:
         emit_stmt(st, s2)
-    ctx.builder.branch(head_block)
+    if not ctx.builder.block.is_terminated:
+        br = ctx.builder.branch(head_block)
+        loop_md = st.module.add_metadata([])
+        loop_md.operands = [loop_md]
+        br.set_metadata("llvm.loop", loop_md)
 
     ctx.builder.position_at_end(end_block)
 
@@ -206,18 +206,22 @@ def _emit_loop_counted(st: EmitState, s: A.LoopCounted) -> None:
     ctx.builder.branch(head_block)
 
     ctx.builder.position_at_end(head_block)
-    phi = ctx.builder.phi(Int32, name=ctx.next_temp("iv"))
-    phi.add_incoming(ir.Constant(Int32, 0), pre_block)
+    phi = ctx.builder.phi(ir.IntType(64), name=ctx.next_temp("iv"))
+    phi.add_incoming(ir.Constant(ir.IntType(64), 0), pre_block)
 
-    cond = ctx.builder.icmp_signed("<", phi, ir.Constant(Int32, s.count), name=ctx.next_temp("icond"))
+    cond = ctx.builder.icmp_signed("<", phi, ir.Constant(ir.IntType(64), s.count), name=ctx.next_temp("icond"))
     ctx.builder.cbranch(cond, body_block, end_block)
 
     ctx.builder.position_at_end(body_block)
     for s2 in s.body.stmts:
         emit_stmt(st, s2)
-    nv = ctx.builder.add(phi, ir.Constant(Int32, 1), name=ctx.next_temp("ne"), flags=["nsw"])
-    ctx.builder.branch(head_block)
-    phi.add_incoming(nv, body_block)
+    if not ctx.builder.block.is_terminated:
+        nv = ctx.builder.add(phi, ir.Constant(ir.IntType(64), 1), name=ctx.next_temp("ne"), flags=["nsw"])
+        br = ctx.builder.branch(head_block)
+        loop_md = st.module.add_metadata([])
+        loop_md.operands = [loop_md]
+        br.set_metadata("llvm.loop", loop_md)
+        phi.add_incoming(nv, body_block)
 
     ctx.builder.position_at_end(end_block)
 

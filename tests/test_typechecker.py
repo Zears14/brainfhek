@@ -18,3 +18,18 @@ def test_unknown_function_raises():
     """
     with pytest.raises(BF2TypeError):
         check_module(parse_source(src))
+
+
+def test_segment_bounds_check():
+    src = """
+    seg s { i32[10] }
+    fn main() -> i32 {
+        s[10] = 5
+        ret 0
+    }
+    """
+    from bf2.compiler.diagnostics import DiagnosticCollector
+    diag = DiagnosticCollector(enabled={"bounds"})
+    check_module(parse_source(src), diag=diag)
+    assert diag.has_warnings()
+    assert any("out of bounds" in d.message for d in diag.diagnostics)

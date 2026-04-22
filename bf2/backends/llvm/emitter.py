@@ -16,7 +16,7 @@ from bf2.backends.llvm.emit_state import EmitState
 from bf2.backends.llvm.types import to_ir_type, align, get_struct_type, Int8, Int32, Pointer
 from bf2.backends.llvm.emit_preamble import (
     emit_preamble, emit_struct_types, emit_global_segments,
-    emit_fn_attrs, emit_metadata, emit_string_constants
+    emit_metadata, emit_string_constants
 )
 from bf2.backends.llvm.emit_stmts import emit_stmt
 from bf2.backends.llvm.emit_watch import try_static_seg_slot, emit_watch_fn
@@ -30,7 +30,6 @@ class LLVMEmitterVisitor:
             mod=mod,
             target=target,
         )
-        self.st.fn_attrs["#0"] = "nounwind"
 
     def emit(self) -> ir.Module:
         st = self.st
@@ -62,7 +61,6 @@ class LLVMEmitterVisitor:
         for i, (seg, slot, r) in enumerate(st.watches):
             emit_watch_fn(st, i, seg, slot, r)
 
-        emit_fn_attrs(st)
         emit_metadata(st)
         emit_string_constants(st)
 
@@ -75,6 +73,7 @@ class LLVMEmitterVisitor:
         arg_tys = [to_ir_type(t) for _, t in f.params]
         fnty = ir.FunctionType(ret_ty, arg_tys)
         fn = ir.Function(st.module, fnty, name=f.name)
+        fn.attributes.add("nounwind")
         entry_block = fn.append_basic_block(name="entry")
         builder = ir.IRBuilder(entry_block)
 
@@ -127,6 +126,8 @@ class LLVMEmitterVisitor:
 
 def emit_llvm_ir(mod: A.Module, target: str | None = None) -> ir.Module:
     """Public API: emit LLVM IR for a BF2 module (returns ir.Module)."""
+    from bf2.backends.llvm.types import clear_type_caches
+    clear_type_caches()
     if target is None:
         target = f"{platform.machine()}-pc-linux-gnu"
     return LLVMEmitterVisitor(mod, target).emit()

@@ -13,7 +13,7 @@ from bf2.backends.llvm.types import (
 
 def emit_preamble(st: EmitState) -> None:
     """Emit target triple, external declarations, built-in globals and format strings."""
-    st.module = ir.Module(name="bf2_module")
+    st.module = ir.Module(name="bf2_module", context=ir.Context())
     st.module.triple = st.target
 
     use_linux = getattr(st.mod, "use_linux_stdlib", False)
@@ -40,9 +40,6 @@ def emit_preamble(st: EmitState) -> None:
     tape.initializer = ir.Constant(tape_ty, None)
     tape.align = 16
 
-    cslot = ir.GlobalVariable(st.module, Int32, name="__cslot")
-    cslot.initializer = ir.Constant(Int32, 0)
-    cslot.align = 4
 
     fmt_i = ir.GlobalVariable(st.module, ir.ArrayType(Int8, 4), name="__bf2_fmt_i")
     fmt_i.initializer = ir.Constant(ir.ArrayType(Int8, 4), bytearray(b"%d\n\0"))
@@ -141,10 +138,6 @@ def emit_global_segments(st: EmitState) -> None:
         st.seg_slots[name] = gv
 
 
-def emit_fn_attrs(st: EmitState) -> None:
-    """Emit function attribute groups at the end of the module."""
-    for group_id, attrs in st.fn_attrs.items():
-        pass
 
 
 def emit_metadata(st: EmitState) -> None:

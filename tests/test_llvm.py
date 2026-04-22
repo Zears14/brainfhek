@@ -126,3 +126,121 @@ def test_linux_stdlib_ir(tmp_path):
     assert "__bf2_fmt" in ir
     assert "STDOUT" in ir
     assert "O_CREAT" in ir
+
+
+def test_sext_for_signed_coercion_in_binop():
+    src = """
+fn main() -> i32 {
+    seg buf { i64[2] }
+    i32 neg = -5
+    i32 pos = 10
+    buf[0] = neg + pos
+    i64 result = buf[0]
+    ret 0
+}
+"""
+    ir = _emit(src)
+    assert "sext i32" in ir
+    assert "zext i32" not in ir
+
+
+def test_sext_for_signed_coercion_in_assign():
+    src = """
+fn main() -> i32 {
+    i32 x = -100
+    i64 y = x
+    ret 0
+}
+"""
+    ir = _emit(src)
+    assert "sext i32" in ir
+    assert "zext i32" not in ir
+
+
+def test_sext_for_i32_to_i64_call_args():
+    src = """
+    #include "stdlib"
+    fn main() -> i32 {
+        i32 n = -1
+        call write(1, "test", n)
+        ret 0
+    }
+    """
+    ir = _emit(src)
+    assert "sext i32" in ir
+    assert "zext i32" not in ir
+
+
+def test_no_orphan_cslot_global():
+    src = "fn main() -> i32 { ret 0 }"
+    ir = _emit(src)
+    assert '@"__cslot"' not in ir
+
+
+def test_local_seg_initialized():
+    src = """
+    fn main() -> i32 {
+        seg buf { i32[16] }
+        seg result { i64[1] }
+        result[0] = buf[0] + buf[1]
+        ret 0
+    }
+    """
+    ir = _emit(src)
+    assert "zeroinitializer" in ir
+
+
+def test_nounwind_on_all_functions():
+    src = """
+    fn helper(n: i32) -> i32 { ret n }
+    fn main() -> i32 { ret 0 }
+    """
+    ir = _emit(src)
+    assert "nounwind" in ir
+    assert ir.count("nounwind") >= 2  # Both helper and main
+    assert "#0" not in ir  # No attribute groups
+
+
+def test_type_cache_isolation():
+    src1 = "fn main() -> i32 { ret 0 }"
+    src2 = "fn main() -> i64 { ret 0 }"
+    ir1 = _emit(src1)
+    ir2 = _emit(src2)
+    # Both should compile without issues, types should be correct
+    assert 'define i32 @"main"() nounwind' in ir1
+    assert 'define i64 @"main"() nounwind' in ir2
+
+
+def test_alloca_declaration_order():
+    src = """
+    fn f(n: i32) -> i32 {
+        seg a { i32[2] }
+        seg b { i32[2] }
+        ret 0
+    }
+    fn main() -> i32 { ret 0 }
+    """
+    ir = _emit(src)
+    # Find positions of declarations
+    cseg_pos = ir.index('"__cseg"')
+    cslot_pos = ir.index('"__cslot"')
+    p_n_pos = ir.index('.p.n"')
+    lseg_a_pos = ir.index('.lseg.a"')
+    lseg_b_pos = ir.index('.lseg.b"')
+    # Verify forward order: cseg < cslot < p.n < lseg.a < lseg.b
+    assert cseg_pos < cslot_pos < p_n_pos < lseg_a_pos < lseg_b_pos
+
+
+def test_loop_metadata():
+    src_bf = "fn main() -> i32 { [ { } ] ret 0 }"
+    src_counted = "fn main() -> i32 { { 5 } { } ret 0 }"
+    ir_bf = _emit(src_bf)
+    ir_counted = _emit(src_counted)
+    assert "!llvm.loop" in ir_bf
+    assert "!llvm.loop" in ir_counted
+
+
+def test_loop_counted_i64():
+    src = "fn main() -> i32 { { 3000000000 } { } ret 0 }"
+    ir = _emit(src)
+    assert "icmp slt i64" in ir

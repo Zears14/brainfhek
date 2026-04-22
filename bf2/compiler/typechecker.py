@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from bf2.core import ast as A
 from bf2.core.errors import BF2TypeError, SourceLoc
 from bf2.core.visitor import ASTVisitor
-from bf2.backends.common.memory import build_struct_layout
+from bf2.core.memory import build_struct_layout
 from bf2.compiler.diagnostics import DiagnosticCollector
 
 class TypeChecker(ASTVisitor):
@@ -15,7 +15,7 @@ class TypeChecker(ASTVisitor):
         self.mod = mod
         self.diag = diag or DiagnosticCollector()
         self.structs: Dict[str, A.StructDecl] = {}
-        self.segs: Dict[str, A.TypeRef] = {}
+        self.segs: Dict[str, Tuple[A.TypeRef, int]] = {}
         self.fns: Dict[str, Tuple[List[Tuple[str, A.TypeRef]], A.TypeRef]] = {}
         self.scopes: List[Dict[str, A.TypeRef]] = []
         self._used_vars: Set[str] = set()
@@ -28,7 +28,7 @@ class TypeChecker(ASTVisitor):
             if isinstance(item, A.StructDecl):
                 self.structs[item.name] = item
             elif isinstance(item, A.SegmentDecl):
-                self.segs[item.name] = item.elem_type
+                self.segs[item.name] = (item.elem_type, item.length)
             elif isinstance(item, A.FunctionDef):
                 self.fns[item.name] = (list(item.params), item.ret)
         
@@ -58,7 +58,7 @@ class TypeChecker(ASTVisitor):
                 self._used_vars.add(name)
                 return scope[name]
         if name in self.segs:
-            return A.TypeRef("ptr", self.segs[name])
+            return A.TypeRef("ptr", self.segs[name][0])
         raise BF2TypeError(f"undefined identifier '{name}'", loc)
 
     # --- Visitor Implementation ---
@@ -67,7 +67,7 @@ class TypeChecker(ASTVisitor):
         pass
 
     def visit_segment_decl(self, node: A.SegmentDecl) -> None:
-        self.segs[node.name] = node.elem_type
+        self.segs[node.name] = (node.elem_type, node.length)
 
     def visit_segment_stmt(self, node: A.SegmentStmt) -> None:
         self.visit(node.decl)
@@ -181,10 +181,20 @@ class TypeChecker(ASTVisitor):
             raise BF2TypeError("reference must start with name", node.loc)
         
         t = self._resolve(head, node.loc)
+        seg_length = self.segs[head][1] if head in self.segs else None
+        
         slot = 1
         while slot < len(parts):
             p = parts[slot]
-            if isinstance(p, str):
+            if isinstance(p, A.IntLit):
+                if seg_length is not None and slot == 1:
+                    if p.value < 0 or p.value >= seg_length:
+                        self.diag.warn("bounds", f"index {p.value} is out of bounds for segment '{head}' of length {seg_length}", node.loc)
+                # Ensure the index expression itself is typechecked
+                self.visit(p)
+            elif isinstance(p, A.Expr):
+                self.visit(p)
+            elif isinstance(p, str):
                 if t.name == "ptr" and t.inner:
                     inn = t.inner
                     if inn.name in self.structs:

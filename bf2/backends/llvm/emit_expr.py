@@ -37,6 +37,8 @@ def emit_expr(st: EmitState, e: A.Expr, ctx: LLVMContext) -> Tuple[ir.Value, ir.
         return emit_call_expr(st, e, ctx)
     if isinstance(e, A.RefExpr):
         return _emit_ref(st, e, ctx)
+    if isinstance(e, A.StringLit):
+        return _emit_string_lit(st, e, ctx)
     raise LLVMGenError(f"unsupported expr {type(e)}")
 
 
@@ -155,6 +157,16 @@ def _emit_ref(st: EmitState, e: A.RefExpr, ctx: LLVMContext) -> Tuple[ir.Value, 
     return (loaded, ty)
 
 
+def _emit_string_lit(st: EmitState, e: A.StringLit, ctx: LLVMContext) -> Tuple[ir.Value, ir.Type]:
+    name = st.get_string_ident(e.value)
+    gv = st.module.globals.get(name)
+    if gv is None:
+        const_arr = ir.ArrayType(Int8, len(e.value) + 1)
+        gv = ir.GlobalVariable(st.module, const_arr, name=name)
+    ptr = ctx.builder.bitcast(gv, Pointer, name=ctx.next_temp("str"))
+    return (ptr, Pointer)
+
+
 def emit_call_expr(st: EmitState, c: A.Call, ctx: LLVMContext) -> Tuple[ir.Value, ir.Type]:
     """Emit a function call expression and return (ir.Value, ir.Type)."""
     if c.name == "sqrt":
@@ -200,7 +212,7 @@ def emit_call_expr(st: EmitState, c: A.Call, ctx: LLVMContext) -> Tuple[ir.Value
         target_t = to_ir_type(pt)
         # Handle integer type coercion (i32 <-> i64)
         if target_t == Int64 and at == Int32:
-            av = ctx.builder.zext(av, Int64, name=ctx.next_temp("zext"))
+            av = ctx.builder.sext(av, Int64, name=ctx.next_temp("sext"))
             at = Int64
         elif at == Int64 and target_t == Int32:
             av = ctx.builder.trunc(av, Int32, name=ctx.next_temp("trunc"))
@@ -249,7 +261,7 @@ def _coerce(st: EmitState, val: ir.Value, from_ty: ir.Type, to_ty: ir.Type, ctx:
 
     if isinstance(from_ty, ir.IntType) and isinstance(to_ty, ir.IntType):
         if to_ty.width > from_ty.width:
-            return ctx.builder.zext(val, to_ty, name=ctx.next_temp("zext"))
+            return ctx.builder.sext(val, to_ty, name=ctx.next_temp("sext"))
         else:
             return ctx.builder.trunc(val, to_ty, name=ctx.next_temp("trunc"))
 

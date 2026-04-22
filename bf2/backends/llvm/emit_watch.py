@@ -41,6 +41,7 @@ def emit_watch_fn(st: EmitState, idx: int, seg: str, slot: int, r: A.ReactorDef)
     fn = st.module.globals.get(fn_name)
     if fn is None:
         fn = ir.Function(st.module, fn_ty, name=fn_name)
+    fn.attributes.add("nounwind")
     if fn.blocks:
         return
     entry_block = fn.append_basic_block(name="entry")
@@ -114,6 +115,7 @@ def emit_maybe_watch(st: EmitState, seg: str, slot_ssa: str) -> None:
             watch_fn = st.module.globals.get(watch_name)
             if watch_fn is None:
                 watch_fn = ir.Function(st.module, ir.FunctionType(ir.VoidType(), []), name=watch_name)
+            watch_fn.attributes.add("nounwind")
             ctx.builder.call(watch_fn, [])
             ctx.builder.store(d, depth_ptr, align=4)
             ctx.builder.branch(join_block)
@@ -144,6 +146,7 @@ def emit_maybe_watch(st: EmitState, seg: str, slot_ssa: str) -> None:
             watch_fn = st.module.globals.get(watch_name)
             if watch_fn is None:
                 watch_fn = ir.Function(st.module, ir.FunctionType(ir.VoidType(), []), name=watch_name)
+            watch_fn.attributes.add("nounwind")
             ctx.builder.call(watch_fn, [])
             ctx.builder.store(d, depth_ptr, align=4)
             ctx.builder.branch(join_block)
@@ -201,6 +204,7 @@ def emit_maybe_watch_current(st: EmitState) -> None:
         watch_fn = st.module.globals.get(watch_name)
         if watch_fn is None:
             watch_fn = ir.Function(st.module, ir.FunctionType(ir.VoidType(), []), name=watch_name)
+        watch_fn.attributes.add("nounwind")
         ctx.builder.call(watch_fn, [])
         ctx.builder.store(seg_ptr_val, cseg_ptr, align=8)
         ctx.builder.store(slot_v, cslot_ptr, align=4)

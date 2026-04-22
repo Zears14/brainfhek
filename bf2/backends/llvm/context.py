@@ -35,6 +35,7 @@ class LLVMContext:
         "next_label_id",
         "cursor_type",
         "blocks",
+        "_alloca_cursor",
     )
 
     def __init__(self, ret_ty: A.TypeRef, builder: ir.IRBuilder | None = None) -> None:
@@ -55,6 +56,7 @@ class LLVMContext:
         self.next_label_id = 0
         self.cursor_type: ir.Type = Int8
         self.blocks: Dict[str, Any] = {}
+        self._alloca_cursor = None
 
     def next_temp(self, suffix: str = "") -> str:
         """Returns a name WITHOUT the leading %."""
@@ -76,13 +78,15 @@ class LLVMContext:
 
     def hoist_alloca(self, ty: ir.Type, name: str = "") -> ir.Value:
         """Create an alloca in the entry block of the current function."""
-        # Find entry block
         entry = self.builder.function.entry_basic_block
-        # Create a temporary builder at the start of the entry block
         with self.builder.goto_block(entry):
-            # Insert at the beginning of the block
-            if entry.instructions:
+            if self._alloca_cursor is not None:
+                self.builder.position_after(self._alloca_cursor)
+            elif entry.instructions:
                 self.builder.position_before(entry.instructions[0])
             else:
                 self.builder.position_at_start(entry)
-            return self.builder.alloca(ty, name=name)
+            
+            inst = self.builder.alloca(ty, name=name)
+            self._alloca_cursor = inst
+            return inst

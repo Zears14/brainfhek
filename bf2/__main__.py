@@ -10,7 +10,7 @@ from bf2.core.errors import BF2Error, BF2RuntimeError, BF2SyntaxError, BF2TypeEr
 from bf2.compiler.parser import parse_source
 from bf2.compiler.preprocess import Preprocessor, PreprocessError
 from bf2.compiler.typechecker import check_module
-from bf2.backends.interpreter.engine import Interpreter
+from bf2.backends.llvm.jit import run_jit
 from bf2.backends.llvm.emitter import emit_llvm_ir
 from bf2.backends.llvm.emit_mem import LLVMGenError
 from bf2.cli import parse_compile_args
@@ -69,8 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="bf2")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # --- run subcommand (unchanged) ---
-    r = sub.add_parser("run", help="run a .bf2 file in the interpreter")
+    # --- run subcommand (JIT) ---
+    r = sub.add_parser("run", help="run a .bf2 file using JIT")
     r.add_argument("path", help="source file")
     r.add_argument("args", nargs=argparse.REMAINDER, help="arguments to pass to the program")
 
@@ -93,10 +93,9 @@ def main(argv: list[str] | None = None) -> int:
             src, meta = prep.process_file(path)
             mod = parse_source(src, use_linux_stdlib=meta.use_linux_stdlib)
             check_module(mod)
-            interp = Interpreter(mod)
-            out = interp.run([args.path] + args.args)
-            sys.stdout.write(out)
-            return 0
+            target = _detect_target()
+            module = emit_llvm_ir(mod, target)
+            return run_jit(str(module), [args.path] + args.args)
         except PreprocessError as e:
             sys.stderr.write(f"PreprocessError: {e}\n")
             return 2
@@ -145,14 +144,20 @@ def main(argv: list[str] | None = None) -> int:
             # Emit LLVM IR
             target = opts.target or _detect_target()
             module = emit_llvm_ir(mod, target)
+            ir = str(module)
+
+            # Verify IR
+            import llvmlite.binding as llvm
+            try:
+                llvm.parse_assembly(ir).verify()
+            except RuntimeError as e:
+                raise LLVMGenError(f"IR Verification failed:\n{e}")
 
             # LIRO passes (optional, off by default)
             if opts.liro_enabled:
                 from bf2.liro.runner import resolve_liro_spec, run_liros
                 pass_names = resolve_liro_spec(opts.liro_spec)
-                ir = run_liros(str(module), pass_names)
-            else:
-                ir = str(module)
+                ir = run_liros(ir, pass_names)
 
             # LLVM opt (optional, -O1 through -O3)
             if opts.opt_level > 0:
