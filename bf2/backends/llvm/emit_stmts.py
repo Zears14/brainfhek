@@ -9,12 +9,13 @@ from bf2.backends.llvm.emit_state import EmitState
 from bf2.backends.llvm.emit_expr import emit_expr
 from bf2.backends.llvm.emit_mem import (
     gep, get_current_cell_ptr, emit_alloc, emit_free,
-    emit_ptr_arith, emit_ptr_read, emit_ptr_write,
+    emit_ptr_arith, emit_ptr_read, emit_ptr_write, resolve_write_target,
 )
 from bf2.backends.llvm.emit_io import emit_io
 from bf2.backends.llvm.emit_watch import (
     try_static_seg_slot, emit_maybe_watch, emit_maybe_watch_current,
 )
+from bf2.backends.llvm.emit_reactive import emit_reactive_updates
 from bf2.backends.llvm.types import to_ir_type, align, Int1, Int32, Pointer
 
 
@@ -126,15 +127,18 @@ def _emit_ptr_decl(st: EmitState, d: A.PtrDecl) -> None:
 
 def _emit_assign(st: EmitState, s: A.AssignStmt) -> None:
     ctx = st.ctx
-    ptr, ty = gep(st, s.lhs, ctx)
+    ptr, ty, seg_n, idx_v = resolve_write_target(st, s.lhs, ctx)
     rv, rt = emit_expr(st, s.rhs, ctx)
     from bf2.backends.llvm.emit_expr import _coerce
     rv = _coerce(st, rv, rt, ty, ctx)
     ctx.builder.store(rv, ptr, align=align(ty))
+    
+    if seg_n and idx_v:
+        emit_reactive_updates(st, seg_n, idx_v)
+
     sk = try_static_seg_slot(st, s.lhs)
-    in_watch_fn = hasattr(ctx.builder, 'function') and ctx.builder.function.name.startswith("bf2.watch")
-    if sk and not in_watch_fn and not ctx.builder.block.is_terminated:
-        emit_maybe_watch(st, sk[0], str(sk[1]))
+    if sk and not ctx.builder.block.is_terminated:
+        emit_maybe_watch(st, sk[0], sk[1])
 
 
 def _emit_if(st: EmitState, s: A.IfStmt) -> None:
@@ -241,8 +245,10 @@ def _emit_ret(st: EmitState, s: A.RetStmt) -> None:
 
 def _emit_move_op(st: EmitState, s: A.MoveOp) -> None:
     ctx = st.ctx
-    ptr, ty = gep(st, s.target, ctx)
+    ptr, ty, seg_n, idx_v = resolve_write_target(st, s.target, ctx)
     ctx.cursor_type = ty
+    ctx.cursor_seg_name = seg_n
+    ctx.cursor_index_v = idx_v
     if "__cseg" in ctx.locals:
         cseg_ptr, _ = ctx.locals["__cseg"]
     else:
@@ -268,6 +274,8 @@ def _emit_move_rel(st: EmitState, s: A.MoveRel) -> None:
     cv = ctx.builder.load(cslot_ptr, name=ctx.next_temp("idx"))
     nv = ctx.builder.add(cv, ir.Constant(Int32, s.delta), name=ctx.next_temp("nidx"), flags=["nsw"])
     ctx.builder.store(nv, cslot_ptr)
+    if ctx.cursor_seg_name and ctx.cursor_index_v is not None:
+        ctx.cursor_index_v = ctx.builder.add(ctx.cursor_index_v, ir.Constant(Int32, s.delta), name=ctx.next_temp("rel_idx"))
 
 
 def _emit_cell_arith(st: EmitState, s: A.CellArith) -> None:
@@ -289,12 +297,14 @@ def _emit_cell_arith(st: EmitState, s: A.CellArith) -> None:
             ctx.builder.sdiv(v, ir.Constant(ty, int(amount)), name=ctx.next_temp("nv"), flags=flags)
         ))
     ctx.builder.store(result, p, align=align(ty))
+    if ctx.cursor_seg_name and ctx.cursor_index_v is not None:
+        emit_reactive_updates(st, ctx.cursor_seg_name, ctx.cursor_index_v)
     emit_maybe_watch_current(st)
 
 
 def _emit_cell_arith_ref(st: EmitState, s: A.CellArithRef) -> None:
     ctx = st.ctx
-    p, ty = gep(st, s.target, ctx)
+    p, ty, seg_n, idx_v = resolve_write_target(st, s.target, ctx)
     v = ctx.builder.load(p, align=align(ty), name=ctx.next_temp("val"))
     amount = s.amount if s.amount is not None else 1
     if isinstance(ty, (ir.FloatType, ir.DoubleType)):
@@ -311,6 +321,8 @@ def _emit_cell_arith_ref(st: EmitState, s: A.CellArithRef) -> None:
             ctx.builder.sdiv(v, ir.Constant(ty, int(amount)), name=ctx.next_temp("nv"), flags=flags)
         ))
     ctx.builder.store(result, p, align=align(ty))
+    if seg_n and idx_v:
+        emit_reactive_updates(st, seg_n, idx_v)
     sk = try_static_seg_slot(st, s.target)
     if sk:
         emit_maybe_watch(st, sk[0], str(sk[1]))
@@ -325,6 +337,8 @@ def _emit_cell_assign_lit(st: EmitState, s: A.CellAssignLit) -> None:
         ctx.builder.store(ir.Constant(Int1, 1 if s.value else 0), p, align=1)
     else:
         ctx.builder.store(ir.Constant(ty, int(s.value)), p, align=align(ty))
+    if ctx.cursor_seg_name and ctx.cursor_index_v is not None:
+        emit_reactive_updates(st, ctx.cursor_seg_name, ctx.cursor_index_v)
     emit_maybe_watch_current(st)
 
 
@@ -342,19 +356,20 @@ def _emit_store_op(st: EmitState, s: A.StoreOp) -> None:
     ctx = st.ctx
     src_ptr, src_ty = get_current_cell_ptr(st)
     src_val = ctx.builder.load(src_ptr, align=align(src_ty), name=ctx.next_temp("storev"))
-    dst_ptr, dst_ty = gep(st, s.dst, ctx)
+    dst_ptr, dst_ty, seg_n, idx_v = resolve_write_target(st, s.dst, ctx)
     from bf2.backends.llvm.emit_expr import _coerce
     src_val = _coerce(st, src_val, src_ty, dst_ty, ctx)
     ctx.builder.store(src_val, dst_ptr, align=align(dst_ty))
+    if seg_n and idx_v:
+        emit_reactive_updates(st, seg_n, idx_v)
     sk = try_static_seg_slot(st, s.dst)
-    in_watch_fn = ctx.builder.function.name.startswith("bf2.watch")
-    if sk and not in_watch_fn and not ctx.builder.block.is_terminated:
-        emit_maybe_watch(st, sk[0], str(sk[1]))
+    if sk and not ctx.builder.block.is_terminated:
+        emit_maybe_watch(st, sk[0], sk[1])
 
 
 def _emit_swap_op(st: EmitState, s: A.SwapOp) -> None:
     ctx = st.ctx
-    other_ptr, other_ty = gep(st, s.other, ctx)
+    other_ptr, other_ty, seg_n, idx_v = resolve_write_target(st, s.other, ctx)
     other_val = ctx.builder.load(other_ptr, align=align(other_ty), name=ctx.next_temp("swap.other"))
     cell_ptr, cell_ty = get_current_cell_ptr(st)
     cell_val = ctx.builder.load(cell_ptr, align=align(cell_ty), name=ctx.next_temp("swap.cell"))
@@ -363,10 +378,15 @@ def _emit_swap_op(st: EmitState, s: A.SwapOp) -> None:
     store_cell = _coerce(st, other_val, other_ty, cell_ty, ctx)
     ctx.builder.store(store_other, other_ptr, align=align(other_ty))
     ctx.builder.store(store_cell, cell_ptr, align=align(cell_ty))
+    
+    if seg_n and idx_v:
+        emit_reactive_updates(st, seg_n, idx_v)
+    if ctx.cursor_seg_name and ctx.cursor_index_v is not None:
+        emit_reactive_updates(st, ctx.cursor_seg_name, ctx.cursor_index_v)
+
     sk = try_static_seg_slot(st, s.other)
-    in_watch_fn = ctx.builder.function.name.startswith("bf2.watch")
-    if sk and not in_watch_fn and not ctx.builder.block.is_terminated:
-        emit_maybe_watch(st, sk[0], str(sk[1]))
+    if sk and not ctx.builder.block.is_terminated:
+        emit_maybe_watch(st, sk[0], sk[1])
 
 
 def _emit_cond(st: EmitState, s: A.Cond) -> ir.Value:

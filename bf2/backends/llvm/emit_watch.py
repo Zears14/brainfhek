@@ -74,23 +74,33 @@ def emit_watch_fn(st: EmitState, idx: int, seg: str, slot: int, r: A.ReactorDef)
     builder.ret_void()
 
 
-def emit_maybe_watch(st: EmitState, seg: str, slot_ssa: str) -> None:
-    """Emit reactor dispatch for a static segment write.
-
-    **Static constant folding**: if ``slot_ssa`` is a plain integer string,
-    we compare it against each watch's slot at Python compile time.  When
-    they don't match, we emit zero IR (the reactor can never fire).
-    """
+def emit_maybe_watch(st: EmitState, seg: str, slot_v: ir.Value | str) -> None:
+    """Emit reactor dispatch for a static or dynamic segment write."""
     ctx = st.ctx
     if ctx.builder.block.is_terminated:
         return
-    is_static_slot = slot_ssa.lstrip("-").isdigit()
+    
+    if isinstance(slot_v, str):
+        is_static_slot = slot_v.lstrip("-").isdigit()
+        slot_v_ir = ir.Constant(Int32, int(slot_v)) if is_static_slot else None
+    elif isinstance(slot_v, int):
+        is_static_slot = True
+        slot_v_ir = ir.Constant(Int32, slot_v)
+    else:
+        is_static_slot = False
+        slot_v_ir = slot_v
 
     for i, (wseg, wslot, _) in enumerate(st.watches):
         if wseg != seg:
             continue
 
-        if is_static_slot and int(slot_ssa) != wslot:
+        if is_static_slot and int(slot_v) != wslot:
+            continue
+
+        # Prevent self-recursion: don't fire if we're already in this specific watch function
+        watch_name = f"bf2.watch.{i}"
+        in_this_watch = hasattr(ctx.builder, 'function') and ctx.builder.function.name == watch_name
+        if in_this_watch:
             continue
 
         skip_block = ctx.builder.append_basic_block(name=ctx.next_temp(f"skip.watch.{i}"))
@@ -125,8 +135,7 @@ def emit_maybe_watch(st: EmitState, seg: str, slot_ssa: str) -> None:
 
             ctx.builder.position_at_end(join_block)
         else:
-            slot_val = ir.Constant(Int32, int(slot_ssa))
-            is_slot = ctx.builder.icmp_signed("==", slot_val, ir.Constant(Int32, wslot), name=ctx.next_temp("is_slot"))
+            is_slot = ctx.builder.icmp_signed("==", slot_v_ir, ir.Constant(Int32, wslot), name=ctx.next_temp("is_slot"))
 
             depth_ptr = st.module.globals.get("bf2.watch.depth")
             if depth_ptr is None:
@@ -189,12 +198,23 @@ def emit_maybe_watch_current(st: EmitState) -> None:
         d = ctx.builder.load(depth_ptr, align=4, name=ctx.next_temp("depth"))
         can_fire = ctx.builder.icmp_signed("<", d, ir.Constant(Int32, 8), name=ctx.next_temp("can_fire"))
         must_fire = ctx.builder.and_(match, can_fire, name=ctx.next_temp("must_fire"))
-
+        
+        # Prevent self-recursion
+        watch_name = f"bf2.watch.{i}"
+        in_this_watch = hasattr(ctx.builder, 'function') and ctx.builder.function.name == watch_name
+        
         fire_block = ctx.builder.append_basic_block(name=ctx.next_temp(f"fire.watch.{i}"))
         skip_block = ctx.builder.append_basic_block(name=ctx.next_temp(f"skip.watch.{i}"))
         join_block = ctx.builder.append_basic_block(name=ctx.next_temp(f"join.watch.{i}"))
 
-        ctx.builder.cbranch(must_fire, fire_block, skip_block)
+        # Combine conditions
+        final_cond = ctx.builder.and_(must_fire, ctx.builder.not_(ir.Constant(ir.IntType(1), 1) if in_this_watch else ir.Constant(ir.IntType(1), 0)), name=ctx.next_temp("final_cond"))
+        # Wait, that's complex. Let's just use Python 'if' if possible or a simple 'and'.
+        
+        if in_this_watch:
+            ctx.builder.branch(skip_block)
+        else:
+            ctx.builder.cbranch(must_fire, fire_block, skip_block)
 
         ctx.builder.position_at_end(fire_block)
         ndepth = ctx.builder.add(d, ir.Constant(Int32, 1), name=ctx.next_temp("ndepth"))

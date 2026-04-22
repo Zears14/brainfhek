@@ -88,7 +88,7 @@ class Lexer:
             if self._match_string("/*"):
                 self._skip_block_comment()
                 continue
-            if c in "><+-.,[]{}()@=;":
+            if c in "><+-.,[]{}()@=;&|^~":
                 yield from self._read_operator(c, start_line, start_col)
                 continue
             if c in "*/":

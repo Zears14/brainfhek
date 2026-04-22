@@ -1,0 +1,16 @@
+// Linked Vector Addition Example
+seg a { f32[4] }
+seg b { f32[4] }
+seg c { f32[4] } = a + b
+
+fn main() -> i32 {
+    a[0] = 1.0
+    b[0] = 2.0
+    @c[0].f // Should print 3.000000
+    
+    a[1] = 10.0
+    b[1] = 20.0
+    @c[1].f // Should print 30.000000
+    
+    ret 0
+}

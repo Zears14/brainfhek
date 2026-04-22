@@ -36,6 +36,8 @@ class LLVMContext:
         "cursor_type",
         "blocks",
         "_alloca_cursor",
+        "cursor_seg_name",
+        "cursor_index_v",
     )
 
     def __init__(self, ret_ty: A.TypeRef, builder: ir.IRBuilder | None = None) -> None:
@@ -57,6 +59,8 @@ class LLVMContext:
         self.cursor_type: ir.Type = Int8
         self.blocks: Dict[str, Any] = {}
         self._alloca_cursor = None
+        self.cursor_seg_name: Optional[str] = None
+        self.cursor_index_v: Optional[ir.Value] = None
 
     def next_temp(self, suffix: str = "") -> str:
         """Returns a name WITHOUT the leading %."""

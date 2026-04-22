@@ -20,6 +20,7 @@ from bf2.backends.llvm.emit_preamble import (
 )
 from bf2.backends.llvm.emit_stmts import emit_stmt
 from bf2.backends.llvm.emit_watch import try_static_seg_slot, emit_watch_fn
+from bf2.core.analysis import find_segment_deps
 
 
 class LLVMEmitterVisitor:
@@ -43,6 +44,12 @@ class LLVMEmitterVisitor:
                 st.fns[item.name] = item
             elif isinstance(item, A.SegmentDecl):
                 st.global_segs[item.name] = item
+                if item.init:
+                    deps = find_segment_deps(item.init)
+                    for d in deps:
+                        if d not in st.links:
+                            st.links[d] = []
+                        st.links[d].append(item)
             elif isinstance(item, A.ReactorDef):
                 sk = try_static_seg_slot(st, item.target)
                 if sk:

@@ -39,6 +39,8 @@ def emit_expr(st: EmitState, e: A.Expr, ctx: LLVMContext) -> Tuple[ir.Value, ir.
         return _emit_ref(st, e, ctx)
     if isinstance(e, A.StringLit):
         return _emit_string_lit(st, e, ctx)
+    if hasattr(e, "ssa_value"):
+        return (e.ssa_value, e.ssa_value.type)
     raise LLVMGenError(f"unsupported expr {type(e)}")
 
 

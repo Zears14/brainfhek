@@ -45,6 +45,7 @@ class SegmentDecl:
     name: str
     elem_type: TypeRef
     length: int
+    init: Optional[Expr] = None
     loc: SourceLoc = field(default_factory=lambda: SourceLoc(1, 1))
 
     def accept(self, visitor: ASTVisitor) -> Any:

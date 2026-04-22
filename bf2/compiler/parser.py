@@ -76,7 +76,10 @@ class Parser:
             n = int(self._consume("INT", "seg length").value)
             self._consume("SYMBOL", "]")
         self._consume("SYMBOL", "}")
-        return A.SegmentDecl(name, ty, n, loc)
+        init = None
+        if self._match("SYMBOL", "="):
+            init = self._parse_expression()
+        return A.SegmentDecl(name, ty, n, init, loc)
 
     def _parse_struct(self) -> A.StructDecl:
         loc = self._loc()
@@ -315,7 +318,43 @@ class Parser:
         return A.AllocStmt(ty, n, nm, loc)
 
     def _parse_expression(self) -> A.Expr:
-        return self._parse_add()
+        return self._parse_or()
+
+    def _parse_or(self) -> A.Expr:
+        e = self._parse_xor()
+        while self._peek().value == "|":
+            op = self._consume("SYMBOL", "op").value
+            e = A.BinOp(str(op), e, self._parse_xor(), e.loc)
+        return e
+
+    def _parse_xor(self) -> A.Expr:
+        e = self._parse_and()
+        while self._peek().value == "^":
+            op = self._consume("SYMBOL", "op").value
+            e = A.BinOp(str(op), e, self._parse_and(), e.loc)
+        return e
+
+    def _parse_and(self) -> A.Expr:
+        e = self._parse_shift()
+        while self._peek().value == "&":
+            op = self._consume("SYMBOL", "op").value
+            e = A.BinOp(str(op), e, self._parse_shift(), e.loc)
+        return e
+
+    def _parse_shift(self) -> A.Expr:
+        e = self._parse_add()
+        while True:
+            t1 = self._peek()
+            t2 = self._peek(1)
+            if t1.value == "<" and t2.value == "<":
+                self._adv(2)
+                e = A.BinOp("<<", e, self._parse_add(), e.loc)
+            elif t1.value == ">" and t2.value == ">":
+                self._adv(2)
+                e = A.BinOp(">>", e, self._parse_add(), e.loc)
+            else:
+                break
+        return e
 
     def _parse_add(self) -> A.Expr:
         e = self._parse_mul()

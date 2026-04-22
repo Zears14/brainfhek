@@ -33,7 +33,7 @@ TypeRef      ::= 'ptr' '<' TypeRef '>'
                | TYPE
                | IDENT
 
-SegDecl      ::= 'seg' IDENT '{' TypeRef ('[' INT ']')? '}'
+SegDecl      ::= 'seg' IDENT '{' TypeRef ('[' INT ']')? '}' ('=' Expr)?
 
 StructDecl   ::= 'struct' IDENT '{' StructField* '}'
 StructField  ::= IDENT ':' TypeRef ','?

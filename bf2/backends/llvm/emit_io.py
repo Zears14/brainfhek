@@ -127,6 +127,8 @@ def _emit_print_expr(st: EmitState, expr: A.Expr, fmt: str, use_linux: bool) -> 
             return
         fmt_cast = ctx.builder.bitcast(fmt_gv, Pointer, name=ctx.next_temp("fmtcast"))
         printf_fn = _get_or_declare(st, "printf", ir.FunctionType(Int32, [Pointer], var_arg=True))
+        if vty == ir.FloatType():
+             v = ctx.builder.fpext(v, ir.DoubleType(), name=ctx.next_temp("fpext"))
         ctx.builder.call(printf_fn, [fmt_cast, v])
 
 
@@ -138,8 +140,11 @@ def _emit_print_cell(st: EmitState, fmt: str, use_linux: bool) -> None:
         _emit_snprintf_write(st, v, ty, fmt)
     else:
         fmt_gv = st.module.globals.get(fmt)
+        fmt_cast = ctx.builder.bitcast(fmt_gv, Pointer, name=ctx.next_temp("fmtcast"))
         printf_fn = _get_or_declare(st, "printf", ir.FunctionType(Int32, [Pointer], var_arg=True))
-        ctx.builder.call(printf_fn, [fmt_gv, v])
+        if ty == ir.FloatType():
+             v = ctx.builder.fpext(v, ir.DoubleType(), name=ctx.next_temp("fpext"))
+        ctx.builder.call(printf_fn, [fmt_cast, v])
 
 
 def _emit_print_string(st: EmitState, use_linux: bool) -> None:
@@ -153,8 +158,9 @@ def _emit_print_string(st: EmitState, use_linux: bool) -> None:
         ctx.builder.call(write_fn, [ir.Constant(Int32, 1), v, ln])
     else:
         fmt_gv = st.module.globals.get("__bf2_fmt_s")
+        fmt_cast = ctx.builder.bitcast(fmt_gv, Pointer, name=ctx.next_temp("fmtcast"))
         printf_fn = _get_or_declare(st, "printf", ir.FunctionType(Int32, [Pointer], var_arg=True))
-        ctx.builder.call(printf_fn, [fmt_gv, v])
+        ctx.builder.call(printf_fn, [fmt_cast, v])
 
 
 def _emit_getchar(st: EmitState, use_linux: bool) -> None:

@@ -79,6 +79,10 @@ def gep(st: EmitState, r: A.RefExpr, ctx: LLVMContext) -> Tuple[ir.Value, ir.Typ
             if isinstance(sub, int):
                 idx = sub
             elif isinstance(sub, A.IntLit):
+                if hasattr(sub, "ssa_value"):
+                    idx_v = sub.ssa_value
+                    arr_ptr = ctx.builder.gep(base_ptr, [ir.Constant(Int32, 0), idx_v], inbounds=True, name=ctx.next_temp("arr"))
+                    return (arr_ptr, lty)
                 idx = sub.value
             else:
                 from bf2.backends.llvm.emit_expr import emit_expr
@@ -111,6 +115,11 @@ def gep(st: EmitState, r: A.RefExpr, ctx: LLVMContext) -> Tuple[ir.Value, ir.Typ
                     ptr = ctx.builder.gep(pb, [idx_v], inbounds=True, name=ctx.next_temp("ptr"))
                 elif isinstance(lty, ir.ArrayType):
                     inn_ty = lty.element
+                    if hasattr(sub, "ssa_value"):
+                         idx_v = sub.ssa_value
+                    else:
+                         from bf2.backends.llvm.emit_expr import emit_expr
+                         idx_v, _ = emit_expr(st, sub, ctx)
                     ptr_old = ptr
                     ptr = ctx.builder.gep(ptr_old, [ir.Constant(Int32, 0), idx_v], inbounds=True, name=ctx.next_temp("ptr"))
                     lty = inn_ty
@@ -179,6 +188,44 @@ def gep(st: EmitState, r: A.RefExpr, ctx: LLVMContext) -> Tuple[ir.Value, ir.Typ
         return (p_res, lty)
 
     raise LLVMGenError(f"Cannot resolve reference {r.parts}")
+
+
+def resolve_write_target(st: EmitState, r: A.RefExpr, ctx: LLVMContext) -> Tuple[ir.Value, ir.Type, Optional[str], Optional[ir.Value]]:
+    """Similar to gep(), but also returns (seg_name, index_v) for reactive updates."""
+    has_at = r.parts and r.parts[0] == "@"
+    base_idx = 1 if has_at else 0
+    base_n = r.parts[base_idx]
+
+    gv = st.global_segs.get(base_n)
+    if gv is not None:
+        base_ptr = st.seg_slots[base_n]
+        lty = to_ir_type(gv.elem_type)
+        
+        if len(r.parts) > base_idx + 1:
+            sub = r.parts[base_idx + 1]
+            if isinstance(sub, int):
+                idx_v = ir.Constant(Int32, sub)
+            elif isinstance(sub, A.IntLit):
+                if hasattr(sub, "ssa_value"):
+                    idx_v = sub.ssa_value
+                else:
+                    idx_v = ir.Constant(Int32, sub.value)
+            elif isinstance(sub, A.Expr):
+                from bf2.backends.llvm.emit_expr import emit_expr
+                idx_v, _ = emit_expr(st, sub, ctx)
+            else:
+                # It's a field access (str), not supported for reactive updates yet
+                ptr, ty = gep(st, r, ctx)
+                return ptr, ty, None, None
+            
+            ptr = ctx.builder.gep(base_ptr, [ir.Constant(Int32, 0), idx_v], inbounds=True, name=ctx.next_temp("arr"))
+            return (ptr, lty, base_n, idx_v)
+        
+        return (base_ptr, lty, base_n, ir.Constant(Int32, 0))
+
+    # For other types of refs (locals, etc.), we don't support reactive updates yet
+    ptr, ty = gep(st, r, ctx)
+    return ptr, ty, None, None
 
 
 def emit_alloc(st: EmitState, s: A.AllocStmt) -> None:
